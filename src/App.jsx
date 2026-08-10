@@ -48,6 +48,7 @@ function makeCase() {
     gooseflowLink: "",
     notes: "",
     flows: [],
+    createdAt: Date.now(),
   };
 }
 
@@ -162,11 +163,11 @@ function StyleBlock() {
 
 /* ---------------------------------- App ---------------------------------- */
 
-const casesRef = ref(db, "casesJson");
+const casesRootRef = ref(db, "casesById");
 
 // Firebase Realtime Database silently drops empty arrays/objects and can
-// reshape arrays into keyed objects. Storing/reading a single JSON string
-// sidesteps all of that — it's just a blob to Firebase either way.
+// reshape arrays into keyed objects. Storing each case as a JSON string
+// value sidesteps all of that — it's just a blob to Firebase either way.
 function normalizeCase(c) {
   return {
     id: c?.id || uid(),
@@ -177,6 +178,7 @@ function normalizeCase(c) {
     gooseflowLink: c?.gooseflowLink || "",
     notes: c?.notes || "",
     flows: Array.isArray(c?.flows) ? c.flows.map(normalizeFlow) : [],
+    createdAt: typeof c?.createdAt === "number" ? c.createdAt : 0,
   };
 }
 function normalizeFlow(f) {
@@ -207,61 +209,64 @@ export default function App() {
   const [expanded, setExpanded] = useState({});
   const [toast, setToast] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle");
-  const saveTimer = useRef(null);
-  const didLoad = useRef(false);
-  const lastWritten = useRef(null);
+  const writeTimers = useRef({}); // caseId -> timeout, so editing one case
+  // never delays or gets coalesced with edits to a different case
+  const pendingWrites = useRef(0);
   const cardRefs = useRef({});
 
   useEffect(() => {
     const unsubscribe = onValue(
-      casesRef,
+      casesRootRef,
       (snapshot) => {
-        const raw = snapshot.val();
-        // Skip only if this snapshot is exactly what we last wrote — a real
-        // echo of our own change, not a race with someone else's edit.
-        if (raw !== null && raw === lastWritten.current) {
-          didLoad.current = true;
-          return;
-        }
-        let parsed = [];
-        try {
-          parsed = raw ? JSON.parse(raw) : [];
-        } catch (e) {
-          console.error("goosebrief: corrupt data, resetting to empty list", e);
-          parsed = [];
-        }
-        const safe = Array.isArray(parsed) ? parsed.map(normalizeCase) : [];
-        setCases(safe);
-        didLoad.current = true;
+        const obj = snapshot.val() || {};
+        const list = Object.values(obj).map((raw) => {
+          try {
+            return normalizeCase(JSON.parse(raw));
+          } catch (e) {
+            return null;
+          }
+        }).filter(Boolean);
+        list.sort((a, b) => a.createdAt - b.createdAt);
+        setCases(list);
       },
       (err) => {
         console.error("goosebrief read failed:", err);
         setCases([]);
-        didLoad.current = true;
       }
     );
     return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (!didLoad.current || cases === null) return;
+  // Writes only the one case that changed, to its own Firebase key, so
+  // editing case A can never overwrite a concurrent edit to case B.
+  function scheduleWrite(caseObj) {
+    const id = caseObj.id;
+    if (writeTimers.current[id]) clearTimeout(writeTimers.current[id]);
+    pendingWrites.current += 1;
     setSaveStatus("saving");
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const payload = JSON.stringify(cases);
+    writeTimers.current[id] = setTimeout(async () => {
       try {
-        lastWritten.current = payload;
-        await dbSet(casesRef, payload);
-        setSaveStatus("saved");
+        await dbSet(ref(db, `casesById/${id}`), JSON.stringify(caseObj));
       } catch (e) {
-        lastWritten.current = null;
-        setSaveStatus("error");
         console.error("goosebrief save failed:", e);
         showToast(`save failed: ${e.code || e.message || "unknown error"}`);
+      } finally {
+        pendingWrites.current -= 1;
+        setSaveStatus(pendingWrites.current <= 0 ? "saved" : "saving");
       }
-    }, 600);
-    return () => clearTimeout(saveTimer.current);
-  }, [cases]);
+    }, 300);
+  }
+
+  // Applies an updater to one case in local state, and schedules a write
+  // of just that case's new value.
+  function mutateCase(id, updater) {
+    setCases((prev) => {
+      const next = prev.map((c) => (c.id === id ? updater(c) : c));
+      const changed = next.find((c) => c.id === id);
+      if (changed) scheduleWrite(changed);
+      return next;
+    });
+  }
 
   function showToast(msg) {
     setToast(msg);
@@ -269,18 +274,24 @@ export default function App() {
   }
 
   function updateCase(id, patch) {
-    setCases((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    mutateCase(id, (c) => ({ ...c, ...patch }));
   }
   function deleteCase(id) {
     const target = cases.find((c) => c.id === id);
     const label = target?.name?.trim() ? `"${target.name.trim()}"` : "this case";
     if (!window.confirm(`delete ${label} for everyone? this can't be undone.`)) return;
+    if (writeTimers.current[id]) clearTimeout(writeTimers.current[id]);
     setCases((prev) => prev.filter((c) => c.id !== id));
+    dbSet(ref(db, `casesById/${id}`), null).catch((e) => {
+      console.error("goosebrief delete failed:", e);
+      showToast(`delete failed: ${e.code || e.message || "unknown error"}`);
+    });
     showToast("case removed");
   }
   function addCase() {
     const c = makeCase();
     setCases((prev) => [...(prev || []), c]);
+    scheduleWrite(c);
     setExpanded((prev) => ({ ...prev, [c.id]: true }));
     setTimeout(() => {
       cardRefs.current[c.id]?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -288,90 +299,55 @@ export default function App() {
   }
 
   function addFlow(caseId) {
-    setCases((prev) =>
-      prev.map((c) => (c.id === caseId ? { ...c, flows: [...c.flows, makeFlow()] } : c))
-    );
+    mutateCase(caseId, (c) => ({ ...c, flows: [...c.flows, makeFlow()] }));
   }
   function updateFlow(caseId, flowId, patch) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? { ...c, flows: c.flows.map((f) => (f.id === flowId ? { ...f, ...patch } : f)) }
-          : c
-      )
-    );
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) => (f.id === flowId ? { ...f, ...patch } : f)),
+    }));
   }
   function deleteFlow(caseId, flowId) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId ? { ...c, flows: c.flows.filter((f) => f.id !== flowId) } : c
-      )
-    );
+    mutateCase(caseId, (c) => ({ ...c, flows: c.flows.filter((f) => f.id !== flowId) }));
   }
   function addRow(caseId, flowId) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? {
-              ...c,
-              flows: c.flows.map((f) =>
-                f.id === flowId ? { ...f, rows: [...f.rows, makeRow()] } : f
-              ),
-            }
-          : c
-      )
-    );
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) => (f.id === flowId ? { ...f, rows: [...f.rows, makeRow()] } : f)),
+    }));
   }
   function updateRow(caseId, flowId, rowId, patch) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? {
-              ...c,
-              flows: c.flows.map((f) =>
-                f.id === flowId
-                  ? { ...f, rows: f.rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)) }
-                  : f
-              ),
-            }
-          : c
-      )
-    );
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) =>
+        f.id === flowId
+          ? { ...f, rows: f.rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)) }
+          : f
+      ),
+    }));
   }
   function updateCell(caseId, flowId, rowId, speech, value) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) =>
+        f.id === flowId
           ? {
-              ...c,
-              flows: c.flows.map((f) =>
-                f.id === flowId
-                  ? {
-                      ...f,
-                      rows: f.rows.map((r) =>
-                        r.id === rowId ? { ...r, cells: { ...r.cells, [speech]: value } } : r
-                      ),
-                    }
-                  : f
+              ...f,
+              rows: f.rows.map((r) =>
+                r.id === rowId ? { ...r, cells: { ...r.cells, [speech]: value } } : r
               ),
             }
-          : c
-      )
-    );
+          : f
+      ),
+    }));
   }
   function deleteRow(caseId, flowId, rowId) {
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? {
-              ...c,
-              flows: c.flows.map((f) =>
-                f.id === flowId ? { ...f, rows: f.rows.filter((r) => r.id !== rowId) } : f
-              ),
-            }
-          : c
-      )
-    );
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) =>
+        f.id === flowId ? { ...f, rows: f.rows.filter((r) => r.id !== rowId) } : f
+      ),
+    }));
   }
 
   function exportFlow(caseName, flow) {
@@ -393,7 +369,13 @@ export default function App() {
 
   function clearAll() {
     if (window.confirm("delete every case and flow for everyone? this can't be undone.")) {
+      Object.values(writeTimers.current).forEach(clearTimeout);
+      writeTimers.current = {};
       setCases([]);
+      dbSet(casesRootRef, null).catch((e) => {
+        console.error("goosebrief clear failed:", e);
+        showToast(`clear failed: ${e.code || e.message || "unknown error"}`);
+      });
       showToast("cleared");
     }
   }
