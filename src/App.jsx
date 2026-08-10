@@ -209,21 +209,20 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState("idle");
   const saveTimer = useRef(null);
   const didLoad = useRef(false);
-  const justWrote = useRef(false);
+  const lastWritten = useRef(null);
   const cardRefs = useRef({});
 
   useEffect(() => {
     const unsubscribe = onValue(
       casesRef,
       (snapshot) => {
-        // Skip the very first snapshot right after our own write, so we
-        // don't fight with mid-edit local state.
-        if (justWrote.current) {
-          justWrote.current = false;
+        const raw = snapshot.val();
+        // Skip only if this snapshot is exactly what we last wrote — a real
+        // echo of our own change, not a race with someone else's edit.
+        if (raw !== null && raw === lastWritten.current) {
           didLoad.current = true;
           return;
         }
-        const raw = snapshot.val();
         let parsed = [];
         try {
           parsed = raw ? JSON.parse(raw) : [];
@@ -249,12 +248,13 @@ export default function App() {
     setSaveStatus("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
+      const payload = JSON.stringify(cases);
       try {
-        justWrote.current = true;
-        await dbSet(casesRef, JSON.stringify(cases));
+        lastWritten.current = payload;
+        await dbSet(casesRef, payload);
         setSaveStatus("saved");
       } catch (e) {
-        justWrote.current = false;
+        lastWritten.current = null;
         setSaveStatus("error");
         console.error("goosebrief save failed:", e);
         showToast(`save failed: ${e.code || e.message || "unknown error"}`);
