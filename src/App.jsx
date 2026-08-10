@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { ref, onValue, set as dbSet } from "firebase/database";
+import { db } from "./firebase.js";
 import {
   Plus,
   Trash2,
@@ -11,7 +13,12 @@ import {
 } from "lucide-react";
 
 const SPEECHES = ["1AC", "1NC", "2AC", "2NC", "1NR", "1AR", "2NR", "2AR"];
-const STORAGE_KEY = "case-prep-data";
+
+// Shared team passcode. This is a friction layer, not real security — the
+// database itself is still open to anyone who has the URL. Change this to
+// whatever your team wants before you share the link.
+const TEAM_PASSCODE = "goosebrief2026";
+const GATE_KEY = "gb-unlocked";
 
 const uid = () =>
   Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -25,7 +32,7 @@ function makeRow(label = "") {
 function makeFlow() {
   return {
     id: uid(),
-    title: "New flow",
+    title: "new flow",
     date: new Date().toISOString().slice(0, 10),
     rows: [makeRow()],
   };
@@ -45,11 +52,11 @@ function makeCase() {
 }
 
 const STRENGTH_META = {
-  1: { label: "Weak — beat it easily", color: "#5FA88F" },
-  2: { label: "Manageable", color: "#7FAE87" },
-  3: { label: "Even matchup", color: "#D4A054" },
-  4: { label: "Strong — needs real prep", color: "#C97A4A" },
-  5: { label: "Very strong — biggest threat", color: "#C1584A" },
+  1: { label: "weak — beat it easily", color: "#5FA88F" },
+  2: { label: "manageable", color: "#7FAE87" },
+  3: { label: "even matchup", color: "#D4A054" },
+  4: { label: "strong — needs real prep", color: "#C97A4A" },
+  5: { label: "very strong — biggest threat", color: "#C1584A" },
 };
 
 /* ---------------------------------- Style ---------------------------------- */
@@ -155,26 +162,16 @@ function StyleBlock() {
 
 /* ---------------------------------- App ---------------------------------- */
 
-function loadCases() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const data = raw ? JSON.parse(raw) : [];
-    return Array.isArray(data) ? data : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function saveCases(cases) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cases));
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
+const casesRef = ref(db, "cases");
 
 export default function App() {
+  const [unlocked, setUnlocked] = useState(() => {
+    try {
+      return localStorage.getItem(GATE_KEY) === "1";
+    } catch (e) {
+      return false;
+    }
+  });
   const [cases, setCases] = useState(null);
   const [sortMode, setSortMode] = useState("priority");
   const [query, setQuery] = useState("");
@@ -183,20 +180,45 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState("idle");
   const saveTimer = useRef(null);
   const didLoad = useRef(false);
+  const justWrote = useRef(false);
   const cardRefs = useRef({});
 
   useEffect(() => {
-    setCases(loadCases());
-    didLoad.current = true;
+    const unsubscribe = onValue(
+      casesRef,
+      (snapshot) => {
+        const data = snapshot.val();
+        // Skip the very first snapshot right after our own write, so we
+        // don't fight with mid-edit local state.
+        if (justWrote.current) {
+          justWrote.current = false;
+          didLoad.current = true;
+          return;
+        }
+        setCases(Array.isArray(data) ? data : []);
+        didLoad.current = true;
+      },
+      () => {
+        setCases([]);
+        didLoad.current = true;
+      }
+    );
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     if (!didLoad.current || cases === null) return;
     setSaveStatus("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      const ok = saveCases(cases);
-      setSaveStatus(ok ? "saved" : "error");
+    saveTimer.current = setTimeout(async () => {
+      try {
+        justWrote.current = true;
+        await dbSet(casesRef, cases);
+        setSaveStatus("saved");
+      } catch (e) {
+        justWrote.current = false;
+        setSaveStatus("error");
+      }
     }, 600);
     return () => clearTimeout(saveTimer.current);
   }, [cases]);
@@ -210,8 +232,11 @@ export default function App() {
     setCases((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   }
   function deleteCase(id) {
+    const target = cases.find((c) => c.id === id);
+    const label = target?.name?.trim() ? `"${target.name.trim()}"` : "this case";
+    if (!window.confirm(`delete ${label} for everyone? this can't be undone.`)) return;
     setCases((prev) => prev.filter((c) => c.id !== id));
-    showToast("Case removed");
+    showToast("case removed");
   }
   function addCase() {
     const c = makeCase();
@@ -312,7 +337,7 @@ export default function App() {
   function exportFlow(caseName, flow) {
     const payload = {
       source: "case-prep-tracker",
-      case: caseName || "Untitled case",
+      case: caseName || "untitled case",
       flow: {
         title: flow.title,
         date: flow.date,
@@ -322,14 +347,14 @@ export default function App() {
     };
     navigator.clipboard
       .writeText(JSON.stringify(payload, null, 2))
-      .then(() => showToast("Flow copied — paste into GooseFlow or a doc"))
-      .catch(() => showToast("Couldn't copy — try again"));
+      .then(() => showToast("flow copied — paste into GooseFlow or a doc"))
+      .catch(() => showToast("couldn't copy — try again"));
   }
 
   function clearAll() {
-    if (window.confirm("Delete every case and flow? This can't be undone.")) {
+    if (window.confirm("delete every case and flow for everyone? this can't be undone.")) {
       setCases([]);
-      showToast("Cleared");
+      showToast("cleared");
     }
   }
 
@@ -341,12 +366,16 @@ export default function App() {
     padding: "32px 20px 80px",
   };
 
+  if (!unlocked) {
+    return <Gate onUnlock={() => setUnlocked(true)} rootStyle={rootStyle} />;
+  }
+
   if (cases === null) {
     return (
       <div className="cp-root" style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "360px" }}>
         <StyleBlock />
         <p style={{ color: "var(--cp-muted)", fontFamily: "var(--cp-mono)", fontSize: 13 }}>
-          Loading case list…
+          loading case list…
         </p>
       </div>
     );
@@ -384,10 +413,10 @@ export default function App() {
                 letterSpacing: "-0.01em",
               }}
             >
-              GooseBrief
+              goosebrief
             </h1>
             <span style={{ fontFamily: "var(--cp-mono)", fontSize: 11, color: "var(--cp-muted)" }}>
-              {saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : cases.length ? "Saved" : ""}
+              {saveStatus === "saving" ? "saving…" : saveStatus === "error" ? "save failed" : cases.length ? "saved" : ""}
             </span>
           </div>
         </div>
@@ -430,7 +459,7 @@ export default function App() {
             <Search size={14} color="var(--cp-muted)" />
             <input
               className="cp-input"
-              placeholder="Search cases or teams…"
+              placeholder="search cases or teams…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               style={{ fontSize: 13 }}
@@ -451,10 +480,10 @@ export default function App() {
               outline: "none",
             }}
           >
-            <option value="priority">Sort: most teams running</option>
-            <option value="strongest">Sort: strongest case first</option>
-            <option value="weakest">Sort: weakest case first</option>
-            <option value="name">Sort: name A–Z</option>
+            <option value="priority">sort: most teams running</option>
+            <option value="strongest">sort: strongest case first</option>
+            <option value="weakest">sort: weakest case first</option>
+            <option value="name">sort: name a–z</option>
           </select>
 
           <button
@@ -462,7 +491,7 @@ export default function App() {
             onClick={addCase}
             style={{ padding: "9px 14px", fontSize: 13, fontWeight: 600, borderColor: "var(--cp-accent)" }}
           >
-            <Plus size={15} /> Add case
+            <Plus size={15} /> add case
           </button>
         </div>
 
@@ -477,9 +506,9 @@ export default function App() {
               color: "var(--cp-muted)",
             }}
           >
-            <p style={{ marginBottom: 16, fontSize: 14 }}>No cases logged yet.</p>
+            <p style={{ marginBottom: 16, fontSize: 14 }}>no cases logged yet.</p>
             <button className="cp-btn" onClick={addCase} style={{ padding: "9px 16px", fontSize: 13, margin: "0 auto" }}>
-              <Plus size={15} /> Log your first case
+              <Plus size={15} /> log your first case
             </button>
           </div>
         )}
@@ -523,7 +552,7 @@ export default function App() {
                 textDecoration: "underline",
               }}
             >
-              Clear all data
+              clear all data
             </button>
           </div>
         )}
@@ -549,6 +578,90 @@ export default function App() {
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Gate ---------------------------------- */
+
+function Gate({ onUnlock, rootStyle }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState(false);
+
+  function submit() {
+    if (value.trim().toLowerCase() === TEAM_PASSCODE.trim().toLowerCase()) {
+      try {
+        localStorage.setItem(GATE_KEY, "1");
+      } catch (e) {
+        /* ignore */
+      }
+      onUnlock();
+    } else {
+      setError(true);
+    }
+  }
+
+  return (
+    <div
+      className="cp-root"
+      style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}
+    >
+      <StyleBlock />
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 320,
+          border: "1px solid var(--cp-border)",
+          background: "var(--cp-surface)",
+          borderRadius: 10,
+          padding: 24,
+          textAlign: "center",
+        }}
+      >
+        <h1
+          style={{
+            fontFamily: "var(--cp-display)",
+            fontWeight: 700,
+            fontSize: 22,
+            margin: "0 0 16px",
+          }}
+        >
+          goosebrief
+        </h1>
+        <input
+          className="cp-input"
+          type="password"
+          autoFocus
+          placeholder="team passcode"
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(false);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          style={{
+            fontFamily: "var(--cp-mono)",
+            fontSize: 13,
+            textAlign: "center",
+            border: `1px solid ${error ? "var(--cp-bad)" : "var(--cp-border)"}`,
+            borderRadius: 6,
+            padding: "8px 10px",
+            marginBottom: 12,
+          }}
+        />
+        <button
+          className="cp-btn"
+          onClick={submit}
+          style={{ width: "100%", justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600 }}
+        >
+          unlock
+        </button>
+        {error && (
+          <p style={{ color: "var(--cp-bad)", fontSize: 11, fontFamily: "var(--cp-mono)", marginTop: 10 }}>
+            wrong passcode
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -605,7 +718,7 @@ function CaseCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <input
             className="cp-input"
-            placeholder="e.g. Space Militarization Aff"
+            placeholder="untitled case"
             defaultValue={c.name}
             onBlur={(e) => onUpdate({ name: e.target.value })}
             style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 17 }}
@@ -647,7 +760,7 @@ function CaseCard({
             rel="noopener noreferrer"
             className="cp-btn-icon"
             style={{ padding: 6 }}
-            title="Open neg brief doc"
+            title="open neg brief doc"
             onClick={(e) => e.stopPropagation()}
           >
             <ExternalLink size={15} />
@@ -665,7 +778,7 @@ function CaseCard({
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--cp-border)" }}>
           {/* Teams */}
           <div style={{ marginBottom: 14 }}>
-            <Label>Teams running it</Label>
+            <Label>teams running it</Label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, alignItems: "center" }}>
               {c.teams.map((t, idx) => (
                 <span key={idx} className="cp-tag" style={{ padding: "4px 10px" }}>
@@ -675,7 +788,7 @@ function CaseCard({
               ))}
               <input
                 className="cp-input"
-                placeholder="+ add team, Enter"
+                placeholder="+ add team, enter"
                 value={teamDraft}
                 onChange={(e) => setTeamDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -692,23 +805,23 @@ function CaseCard({
           {/* Links */}
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
             <div style={{ flex: "1 1 260px" }}>
-              <Label>Neg brief doc</Label>
-              <LinkRow value={c.docLink} onCommit={(v) => onUpdate({ docLink: v })} placeholder="Paste Google Doc link" />
+              <Label>neg brief doc</Label>
+              <LinkRow value={c.docLink} onCommit={(v) => onUpdate({ docLink: v })} placeholder="paste google doc link" />
             </div>
             <div style={{ flex: "1 1 260px" }}>
-              <Label>GooseFlow link</Label>
-              <LinkRow value={c.gooseflowLink} onCommit={(v) => onUpdate({ gooseflowLink: v })} placeholder="Paste GooseFlow round link" />
+              <Label>gooseflow link</Label>
+              <LinkRow value={c.gooseflowLink} onCommit={(v) => onUpdate({ gooseflowLink: v })} placeholder="paste gooseflow round link" />
             </div>
           </div>
 
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
-            <Label>Notes</Label>
+            <Label>notes</Label>
             <textarea
               className="cp-input"
               defaultValue={c.notes}
               onBlur={(e) => onUpdate({ notes: e.target.value })}
-              placeholder="Weighing strategy, judge notes, anything worth remembering…"
+              placeholder="weighing strategy, judge notes, anything worth remembering…"
               rows={2}
               style={{ fontSize: 13, marginTop: 4, resize: "vertical" }}
             />
@@ -717,9 +830,9 @@ function CaseCard({
           {/* Flows */}
           <div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <Label>Flows against this case ({c.flows.length})</Label>
+              <Label>flows against this case ({c.flows.length})</Label>
               <button className="cp-btn" onClick={onAddFlow} style={{ padding: "5px 10px", fontSize: 11 }}>
-                <Plus size={12} /> Add flow
+                <Plus size={12} /> add flow
               </button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -738,7 +851,7 @@ function CaseCard({
               ))}
               {c.flows.length === 0 && (
                 <p style={{ color: "var(--cp-muted)", fontSize: 12, fontFamily: "var(--cp-mono)" }}>
-                  No flows logged against this case yet.
+                  no flows logged against this case yet.
                 </p>
               )}
             </div>
@@ -756,7 +869,6 @@ function Label({ children }) {
         fontFamily: "var(--cp-mono)",
         fontSize: 10,
         letterSpacing: "0.08em",
-        textTransform: "uppercase",
         color: "var(--cp-muted)",
       }}
     >
@@ -829,7 +941,7 @@ function FlowBlock({ flow, onUpdate, onDelete, onAddRow, onUpdateRow, onUpdateCe
             <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 760 }}>
               <thead>
                 <tr>
-                  <th style={thStyle}>Arg</th>
+                  <th style={thStyle}>arg</th>
                   {SPEECHES.map((s) => (
                     <th key={s} style={thStyle}>{s}</th>
                   ))}
@@ -870,7 +982,7 @@ function FlowBlock({ flow, onUpdate, onDelete, onAddRow, onUpdateRow, onUpdateCe
             </table>
           </div>
           <button className="cp-btn" onClick={onAddRow} style={{ padding: "5px 10px", fontSize: 11, marginTop: 8 }}>
-            <Plus size={12} /> Add row
+            <Plus size={12} /> add row
           </button>
         </div>
       )}
@@ -883,7 +995,6 @@ const thStyle = {
   fontFamily: "var(--cp-mono)",
   fontSize: 10,
   color: "var(--cp-muted)",
-  textTransform: "uppercase",
   letterSpacing: "0.06em",
   padding: "4px 6px",
   borderBottom: "1px solid var(--cp-border)",
