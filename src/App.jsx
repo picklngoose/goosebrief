@@ -162,7 +162,36 @@ function StyleBlock() {
 
 /* ---------------------------------- App ---------------------------------- */
 
-const casesRef = ref(db, "cases");
+const casesRef = ref(db, "casesJson");
+
+// Firebase Realtime Database silently drops empty arrays/objects and can
+// reshape arrays into keyed objects. Storing/reading a single JSON string
+// sidesteps all of that — it's just a blob to Firebase either way.
+function normalizeCase(c) {
+  return {
+    id: c?.id || uid(),
+    name: c?.name || "",
+    teams: Array.isArray(c?.teams) ? c.teams : [],
+    strength: typeof c?.strength === "number" ? c.strength : 3,
+    docLink: c?.docLink || "",
+    gooseflowLink: c?.gooseflowLink || "",
+    notes: c?.notes || "",
+    flows: Array.isArray(c?.flows) ? c.flows.map(normalizeFlow) : [],
+  };
+}
+function normalizeFlow(f) {
+  return {
+    id: f?.id || uid(),
+    title: f?.title || "untitled flow",
+    date: f?.date || new Date().toISOString().slice(0, 10),
+    rows: Array.isArray(f?.rows) ? f.rows.map(normalizeRow) : [],
+  };
+}
+function normalizeRow(r) {
+  const cells = {};
+  SPEECHES.forEach((s) => (cells[s] = r?.cells?.[s] || ""));
+  return { id: r?.id || uid(), label: r?.label || "", cells };
+}
 
 export default function App() {
   const [unlocked, setUnlocked] = useState(() => {
@@ -187,7 +216,6 @@ export default function App() {
     const unsubscribe = onValue(
       casesRef,
       (snapshot) => {
-        const data = snapshot.val();
         // Skip the very first snapshot right after our own write, so we
         // don't fight with mid-edit local state.
         if (justWrote.current) {
@@ -195,7 +223,16 @@ export default function App() {
           didLoad.current = true;
           return;
         }
-        setCases(Array.isArray(data) ? data : []);
+        const raw = snapshot.val();
+        let parsed = [];
+        try {
+          parsed = raw ? JSON.parse(raw) : [];
+        } catch (e) {
+          console.error("goosebrief: corrupt data, resetting to empty list", e);
+          parsed = [];
+        }
+        const safe = Array.isArray(parsed) ? parsed.map(normalizeCase) : [];
+        setCases(safe);
         didLoad.current = true;
       },
       (err) => {
@@ -214,7 +251,7 @@ export default function App() {
     saveTimer.current = setTimeout(async () => {
       try {
         justWrote.current = true;
-        await dbSet(casesRef, cases);
+        await dbSet(casesRef, JSON.stringify(cases));
         setSaveStatus("saved");
       } catch (e) {
         justWrote.current = false;
