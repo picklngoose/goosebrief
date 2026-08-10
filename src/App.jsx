@@ -334,7 +334,8 @@ export default function App() {
   }
 
   const rootStyle = {
-    minHeight: "100%",
+    minHeight: "100vh",
+    width: "100%",
     background: "var(--cp-bg)",
     color: "var(--cp-text)",
     padding: "32px 20px 80px",
