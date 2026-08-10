@@ -365,7 +365,6 @@ export default function App() {
     return a.name.localeCompare(b.name);
   });
 
-  const totalTeams = new Set(cases.flatMap((c) => c.teams.map((t) => t.toLowerCase()))).size;
   const unprepped = cases.filter((c) => !c.docLink).length;
 
   return (
@@ -375,18 +374,6 @@ export default function App() {
       <div style={{ maxWidth: 880, margin: "0 auto" }}>
         {/* Header */}
         <div style={{ marginBottom: 28 }}>
-          <div
-            style={{
-              fontFamily: "var(--cp-mono)",
-              fontSize: 11,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: "var(--cp-accent)",
-              marginBottom: 8,
-            }}
-          >
-            Scouting report
-          </div>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
             <h1
               style={{
@@ -403,9 +390,6 @@ export default function App() {
               {saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : cases.length ? "Saved" : ""}
             </span>
           </div>
-          <p style={{ color: "var(--cp-muted)", marginTop: 6, fontSize: 14 }}>
-            Track what they're running. Rank the threats. Prep what beats them.
-          </p>
         </div>
 
         {/* Stats */}
@@ -425,7 +409,6 @@ export default function App() {
             }}
           >
             <span><strong style={{ color: "var(--cp-text)" }}>{cases.length}</strong> <span style={{ color: "var(--cp-muted)" }}>cases tracked</span></span>
-            <span><strong style={{ color: "var(--cp-text)" }}>{totalTeams}</strong> <span style={{ color: "var(--cp-muted)" }}>teams scouted</span></span>
             <span><strong style={{ color: unprepped ? "var(--cp-bad)" : "var(--cp-good)" }}>{unprepped}</strong> <span style={{ color: "var(--cp-muted)" }}>without a brief</span></span>
           </div>
         )}
@@ -653,13 +636,23 @@ function CaseCard({
                   }}
                 />
               ))}
-              <span style={{ fontFamily: "var(--cp-mono)", fontSize: 10, color: meta.color, marginLeft: 2 }}>
-                {meta.label}
-              </span>
             </div>
           </div>
         </div>
 
+        {c.docLink ? (
+          <a
+            href={c.docLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="cp-btn-icon"
+            style={{ padding: 6 }}
+            title="Open neg brief doc"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ExternalLink size={15} />
+          </a>
+        ) : null}
         <button className="cp-btn-icon" onClick={onToggle} style={{ padding: 6 }}>
           {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
