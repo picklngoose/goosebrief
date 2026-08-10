@@ -198,7 +198,8 @@ export default function App() {
         setCases(Array.isArray(data) ? data : []);
         didLoad.current = true;
       },
-      () => {
+      (err) => {
+        console.error("goosebrief read failed:", err);
         setCases([]);
         didLoad.current = true;
       }
@@ -218,6 +219,8 @@ export default function App() {
       } catch (e) {
         justWrote.current = false;
         setSaveStatus("error");
+        console.error("goosebrief save failed:", e);
+        showToast(`save failed: ${e.code || e.message || "unknown error"}`);
       }
     }, 600);
     return () => clearTimeout(saveTimer.current);
