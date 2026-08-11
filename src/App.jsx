@@ -7,12 +7,17 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
-  Copy,
   Search,
   X,
 } from "lucide-react";
-
-const SPEECHES = ["1AC", "1NC", "2AC", "2NC", "1NR", "1AR", "2NR", "2AR"];
+import { uid } from "./utils.js";
+import {
+  FlowBoard,
+  SPEECH_DEFS,
+  makeFlowSpeeches,
+  normalizeFlowSpeeches,
+  normalizeFlowConnections,
+} from "./FlowBoard.jsx";
 
 // Shared team passcode. This is a friction layer, not real security — the
 // database itself is still open to anyone who has the URL. Change this to
@@ -20,21 +25,13 @@ const SPEECHES = ["1AC", "1NC", "2AC", "2NC", "1NR", "1AR", "2NR", "2AR"];
 const TEAM_PASSCODE = "goosebrief2026";
 const GATE_KEY = "gb-unlocked";
 
-const uid = () =>
-  Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-
-function makeRow(label = "") {
-  const cells = {};
-  SPEECHES.forEach((s) => (cells[s] = ""));
-  return { id: uid(), label, cells };
-}
-
 function makeFlow() {
   return {
     id: uid(),
     title: "new flow",
     date: new Date().toISOString().slice(0, 10),
-    rows: [makeRow()],
+    speeches: makeFlowSpeeches(),
+    connections: [],
   };
 }
 
@@ -45,7 +42,6 @@ function makeCase() {
     teams: [],
     strength: 3,
     docLink: "",
-    gooseflowLink: "",
     notes: "",
     flows: [],
     createdAt: Date.now(),
@@ -77,6 +73,8 @@ function StyleBlock() {
         --cp-accent: #d4a054;
         --cp-good: #5fa88f;
         --cp-bad: #c1584a;
+        --cp-aff: #5fa88f;
+        --cp-neg: #6f93c9;
         --cp-display: 'Space Grotesk', sans-serif;
         --cp-body: 'Inter', sans-serif;
         --cp-mono: 'IBM Plex Mono', monospace;
@@ -157,6 +155,179 @@ function StyleBlock() {
       .cp-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
       .cp-scroll::-webkit-scrollbar-thumb { background: var(--cp-border); border-radius: 4px; }
       .cp-scroll::-webkit-scrollbar-track { background: transparent; }
+
+      /* Flow board (embedded gooseflow) */
+      .cp-flow-col {
+        min-width: 180px;
+        max-width: 220px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 4px 8px 6px 4px;
+        border-radius: 8px;
+        transition: background 0.15s ease;
+        position: relative;
+      }
+      .cp-flow-col.hovered { background: rgba(255,255,255,0.03); }
+      .cp-flow-col-header {
+        font-family: var(--cp-mono);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 3px 4px 6px;
+        border-bottom: 1px solid var(--cp-border);
+        position: sticky;
+        top: 0;
+        background: var(--cp-bg);
+        z-index: 3;
+      }
+      .cp-flow-col-header.aff { color: var(--cp-aff); }
+      .cp-flow-col-header.neg { color: var(--cp-neg); }
+      .cp-flow-cells { display: flex; flex-direction: column; gap: 4px; margin-left: 10px; padding-bottom: 4px; }
+      .cp-flow-item-wrap { cursor: grab; user-select: none; touch-action: none; border-radius: 6px; }
+      .cp-flow-item-wrap:active { cursor: grabbing; }
+      .cp-flow-cell {
+        background: var(--cp-surface2);
+        border: 1px solid var(--cp-border);
+        border-radius: 6px;
+        display: flex;
+        align-items: flex-start;
+        gap: 4px;
+        padding: 5px 7px 5px 4px;
+        position: relative;
+        transition: border-color 0.15s ease;
+      }
+      .cp-flow-cell:hover { border-color: var(--cp-accent); }
+      .cp-flow-cell.aff { border-left: 2px solid var(--cp-aff); }
+      .cp-flow-cell.neg { border-left: 2px solid var(--cp-neg); }
+      .cp-flow-cell.selected { border-color: var(--cp-accent) !important; box-shadow: 0 0 0 1px var(--cp-accent); background: #241c0c; }
+      .cp-flow-grip {
+        display: flex;
+        align-items: center;
+        color: var(--cp-muted);
+        opacity: 0;
+        cursor: grab;
+        margin-top: 2px;
+        transition: opacity 0.15s ease;
+      }
+      .cp-flow-cell:hover .cp-flow-grip { opacity: 1; }
+      .cp-flow-textarea-wrap { flex: 1; position: relative; min-height: 28px; }
+      .cp-flow-textarea {
+        width: 100%;
+        min-height: 28px;
+        line-height: 1.45;
+        font-size: 11.5px;
+        font-family: var(--cp-mono);
+        background: transparent;
+        border: none;
+        outline: none;
+        color: var(--cp-text);
+        resize: none;
+        overflow: hidden;
+        position: relative;
+        z-index: 2;
+      }
+      .cp-flow-textarea::placeholder { color: var(--cp-muted); }
+      .cp-flow-textarea.tagged { color: transparent !important; caret-color: var(--cp-text) !important; }
+      .cp-flow-tag-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        font-family: var(--cp-mono);
+        font-size: 11.5px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        pointer-events: none;
+      }
+      .cp-flow-space { height: 16px; background: transparent; cursor: grab; }
+      .cp-flow-placeholder {
+        background: var(--cp-surface2);
+        border: 1px dashed var(--cp-border);
+        border-radius: 6px;
+        padding: 5px 7px;
+        min-height: 28px;
+        opacity: 0.35;
+        display: flex;
+        align-items: flex-start;
+      }
+      .cp-flow-placeholder.space { min-height: 16px; padding: 0; }
+      .cp-flow-placeholder-text {
+        font-family: var(--cp-mono);
+        font-size: 11.5px;
+        color: var(--cp-muted);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .cp-flow-floating {
+        position: fixed;
+        pointer-events: none;
+        z-index: 9999;
+        background: var(--cp-surface2);
+        border: 1px solid var(--cp-accent);
+        border-radius: 6px;
+        padding: 5px 7px;
+        min-height: 28px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        opacity: 0.95;
+        font-family: var(--cp-mono);
+        font-size: 11.5px;
+        color: var(--cp-text);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .cp-flow-floating.space { min-height: 16px; padding: 0; opacity: 0.7; }
+      .cp-flow-addcell {
+        font-family: var(--cp-mono);
+        font-size: 10px;
+        padding: 4px;
+        border: 1px dashed var(--cp-border);
+        border-radius: 6px;
+        color: var(--cp-muted);
+        background: transparent;
+        text-align: center;
+        transition: all 0.15s ease;
+        margin-top: 2px;
+        cursor: pointer;
+      }
+      .cp-flow-addcell:hover { color: var(--cp-text); border-color: var(--cp-accent); background: var(--cp-surface2); }
+      .cp-flow-hint {
+        position: absolute;
+        bottom: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--cp-surface2);
+        border: 1px solid var(--cp-border);
+        border-radius: 20px;
+        padding: 4px 12px;
+        font-size: 10px;
+        font-family: var(--cp-mono);
+        color: var(--cp-muted);
+        pointer-events: none;
+        z-index: 20;
+        white-space: nowrap;
+        max-width: calc(100% - 24px);
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .cp-flow-hint.active { border-color: var(--cp-accent); color: var(--cp-text); }
+      .cp-flow-help-btn {
+        width: 20px;
+        height: 20px;
+        font-size: 11px;
+        font-family: var(--cp-mono);
+        color: var(--cp-muted);
+        border: 1px solid var(--cp-border);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s ease;
+        flex-shrink: 0;
+        background: var(--cp-bg);
+      }
+      .cp-flow-help-btn:hover { color: var(--cp-text); border-color: var(--cp-accent); }
     `}</style>
   );
 }
@@ -175,24 +346,49 @@ function normalizeCase(c) {
     teams: Array.isArray(c?.teams) ? c.teams : [],
     strength: typeof c?.strength === "number" ? c.strength : 3,
     docLink: c?.docLink || "",
-    gooseflowLink: c?.gooseflowLink || "",
     notes: c?.notes || "",
     flows: Array.isArray(c?.flows) ? c.flows.map(normalizeFlow) : [],
     createdAt: typeof c?.createdAt === "number" ? c.createdAt : 0,
   };
 }
+
+// Handles both the current flow shape (full flow-board speeches/connections)
+// and the old simple row-per-argument shape from before gooseflow was
+// embedded directly — old rows get folded into their matching speech
+// columns so existing cases don't lose prep work.
 function normalizeFlow(f) {
-  return {
-    id: f?.id || uid(),
-    title: f?.title || "untitled flow",
-    date: f?.date || new Date().toISOString().slice(0, 10),
-    rows: Array.isArray(f?.rows) ? f.rows.map(normalizeRow) : [],
-  };
-}
-function normalizeRow(r) {
-  const cells = {};
-  SPEECHES.forEach((s) => (cells[s] = r?.cells?.[s] || ""));
-  return { id: r?.id || uid(), label: r?.label || "", cells };
+  const id = f?.id || uid();
+  const title = f?.title || "untitled flow";
+  const date = f?.date || new Date().toISOString().slice(0, 10);
+
+  if (Array.isArray(f?.speeches)) {
+    return {
+      id,
+      title,
+      date,
+      speeches: normalizeFlowSpeeches(f.speeches),
+      connections: normalizeFlowConnections(f.connections),
+    };
+  }
+
+  // Legacy migration: each old row had one text cell per speech label.
+  // Every non-empty (label, speech) pair becomes its own argument cell
+  // in that speech's column.
+  const legacyRows = Array.isArray(f?.rows) ? f.rows : [];
+  const speeches = SPEECH_DEFS.map((def) => {
+    const items = [];
+    legacyRows.forEach((r) => {
+      const val = r?.cells?.[def.label];
+      if (val && val.trim()) {
+        const content = r?.label ? `${r.label}: ${val}` : val;
+        items.push({ id: uid(), type: "cell", content });
+      }
+    });
+    if (items.length === 0) items.push({ id: `${def.id}-${uid()}`, type: "cell", content: "" });
+    return { ...def, items };
+  });
+
+  return { id, title, date, speeches, connections: [] };
 }
 
 export default function App() {
@@ -310,61 +506,111 @@ export default function App() {
   function deleteFlow(caseId, flowId) {
     mutateCase(caseId, (c) => ({ ...c, flows: c.flows.filter((f) => f.id !== flowId) }));
   }
-  function addRow(caseId, flowId) {
-    mutateCase(caseId, (c) => ({
-      ...c,
-      flows: c.flows.map((f) => (f.id === flowId ? { ...f, rows: [...f.rows, makeRow()] } : f)),
-    }));
-  }
-  function updateRow(caseId, flowId, rowId, patch) {
-    mutateCase(caseId, (c) => ({
-      ...c,
-      flows: c.flows.map((f) =>
-        f.id === flowId
-          ? { ...f, rows: f.rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)) }
-          : f
-      ),
-    }));
-  }
-  function updateCell(caseId, flowId, rowId, speech, value) {
+  // --- Flow-board mutations (the embedded gooseflow board) ---
+  // All scoped to a single (caseId, flowId, speechId) path within the
+  // case tree, following the same mutateCase → debounced Firebase write
+  // pattern as the rest of the app.
+  function mapFlowSpeeches(caseId, flowId, speechId, fn) {
     mutateCase(caseId, (c) => ({
       ...c,
       flows: c.flows.map((f) =>
-        f.id === flowId
-          ? {
-              ...f,
-              rows: f.rows.map((r) =>
-                r.id === rowId ? { ...r, cells: { ...r.cells, [speech]: value } } : r
-              ),
-            }
-          : f
-      ),
-    }));
-  }
-  function deleteRow(caseId, flowId, rowId) {
-    mutateCase(caseId, (c) => ({
-      ...c,
-      flows: c.flows.map((f) =>
-        f.id === flowId ? { ...f, rows: f.rows.filter((r) => r.id !== rowId) } : f
+        f.id !== flowId
+          ? f
+          : { ...f, speeches: f.speeches.map((s) => (s.id !== speechId ? s : fn(s))) }
       ),
     }));
   }
 
-  function exportFlow(caseName, flow) {
-    const payload = {
-      source: "case-prep-tracker",
-      case: caseName || "untitled case",
-      flow: {
-        title: flow.title,
-        date: flow.date,
-        speeches: SPEECHES,
-        rows: flow.rows.map((r) => ({ label: r.label, cells: r.cells })),
-      },
-    };
-    navigator.clipboard
-      .writeText(JSON.stringify(payload, null, 2))
-      .then(() => showToast("flow copied — paste into GooseFlow or a doc"))
-      .catch(() => showToast("couldn't copy — try again"));
+  function addCellToSpeech(caseId, flowId, speechId) {
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => ({
+      ...s,
+      items: [...s.items, { id: `${speechId}-${uid()}`, type: "cell", content: "" }],
+    }));
+  }
+
+  // Generates the new cell's id up front (not inside setState) so the
+  // caller can focus it immediately, same pattern gooseflow used.
+  function addCellAfterInSpeech(caseId, flowId, speechId, afterCellId) {
+    const newId = `${speechId}-${uid()}`;
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => {
+      const idx = s.items.findIndex((it) => it.id === afterCellId);
+      const newCell = { id: newId, type: "cell", content: "" };
+      if (idx === -1) return { ...s, items: [...s.items, newCell] };
+      const items = [...s.items];
+      items.splice(idx + 1, 0, newCell);
+      return { ...s, items };
+    });
+    return newId;
+  }
+
+  function deleteCellFromSpeech(caseId, flowId, speechId, cellId) {
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) => {
+        if (f.id !== flowId) return f;
+        return {
+          ...f,
+          connections: f.connections.filter((cn) => cn.fromCellId !== cellId && cn.toCellId !== cellId),
+          speeches: f.speeches.map((s) => {
+            if (s.id !== speechId) return s;
+            const cellCount = s.items.filter((it) => it.type === "cell").length;
+            if (cellCount <= 1) {
+              // Never leave a column with zero cells — clear it instead.
+              return {
+                ...s,
+                items: s.items.map((it) =>
+                  it.id === cellId ? { id: `${speechId}-${uid()}`, type: "cell", content: "" } : it
+                ),
+              };
+            }
+            return { ...s, items: s.items.filter((it) => it.id !== cellId) };
+          }),
+        };
+      }),
+    }));
+  }
+
+  function addEmptySpaceToSpeech(caseId, flowId, speechId) {
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => ({
+      ...s,
+      items: [...s.items, { id: `${speechId}-space-${uid()}`, type: "space" }],
+    }));
+  }
+
+  function deleteEmptySpaceFromSpeech(caseId, flowId, speechId, spaceId) {
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => ({
+      ...s,
+      items: s.items.filter((it) => it.id !== spaceId),
+    }));
+  }
+
+  function reorderSpeechItems(caseId, flowId, speechId, newItems) {
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => ({ ...s, items: newItems }));
+  }
+
+  function updateCellContent(caseId, flowId, speechId, cellId, content) {
+    mapFlowSpeeches(caseId, flowId, speechId, (s) => ({
+      ...s,
+      items: s.items.map((it) => (it.id === cellId ? { ...it, content } : it)),
+    }));
+  }
+
+  function addFlowConnection(caseId, flowId, fromCellId, toCellId) {
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) => {
+        if (f.id !== flowId) return f;
+        if (f.connections.some((cn) => cn.fromCellId === fromCellId && cn.toCellId === toCellId)) return f;
+        return { ...f, connections: [...f.connections, { id: uid(), fromCellId, toCellId }] };
+      }),
+    }));
+  }
+
+  function removeFlowConnection(caseId, flowId, connId) {
+    mutateCase(caseId, (c) => ({
+      ...c,
+      flows: c.flows.map((f) => (f.id !== flowId ? f : { ...f, connections: f.connections.filter((cn) => cn.id !== connId) })),
+    }));
   }
 
   function clearAll() {
@@ -550,11 +796,15 @@ export default function App() {
               onAddFlow={() => addFlow(c.id)}
               onUpdateFlow={(flowId, patch) => updateFlow(c.id, flowId, patch)}
               onDeleteFlow={(flowId) => deleteFlow(c.id, flowId)}
-              onAddRow={(flowId) => addRow(c.id, flowId)}
-              onUpdateRow={(flowId, rowId, patch) => updateRow(c.id, flowId, rowId, patch)}
-              onUpdateCell={(flowId, rowId, speech, val) => updateCell(c.id, flowId, rowId, speech, val)}
-              onDeleteRow={(flowId, rowId) => deleteRow(c.id, flowId, rowId)}
-              onExportFlow={(flow) => exportFlow(c.name, flow)}
+              onAddCell={(flowId, speechId) => addCellToSpeech(c.id, flowId, speechId)}
+              onAddCellAfter={(flowId, speechId, cellId) => addCellAfterInSpeech(c.id, flowId, speechId, cellId)}
+              onDeleteCell={(flowId, speechId, cellId) => deleteCellFromSpeech(c.id, flowId, speechId, cellId)}
+              onAddEmptySpace={(flowId, speechId) => addEmptySpaceToSpeech(c.id, flowId, speechId)}
+              onDeleteEmptySpace={(flowId, speechId, spaceId) => deleteEmptySpaceFromSpeech(c.id, flowId, speechId, spaceId)}
+              onReorderItems={(flowId, speechId, items) => reorderSpeechItems(c.id, flowId, speechId, items)}
+              onUpdateCellContent={(flowId, speechId, cellId, content) => updateCellContent(c.id, flowId, speechId, cellId, content)}
+              onAddConnection={(flowId, fromCellId, toCellId) => addFlowConnection(c.id, flowId, fromCellId, toCellId)}
+              onRemoveConnection={(flowId, connId) => removeFlowConnection(c.id, flowId, connId)}
               cardRef={(el) => (cardRefs.current[c.id] = el)}
             />
           ))}
@@ -701,11 +951,15 @@ function CaseCard({
   onAddFlow,
   onUpdateFlow,
   onDeleteFlow,
-  onAddRow,
-  onUpdateRow,
-  onUpdateCell,
-  onDeleteRow,
-  onExportFlow,
+  onAddCell,
+  onAddCellAfter,
+  onDeleteCell,
+  onAddEmptySpace,
+  onDeleteEmptySpace,
+  onReorderItems,
+  onUpdateCellContent,
+  onAddConnection,
+  onRemoveConnection,
   cardRef,
 }) {
   const [teamDraft, setTeamDraft] = useState("");
@@ -825,15 +1079,9 @@ function CaseCard({
           </div>
 
           {/* Links */}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-            <div style={{ flex: "1 1 260px" }}>
-              <Label>neg brief doc</Label>
-              <LinkRow value={c.docLink} onCommit={(v) => onUpdate({ docLink: v })} placeholder="paste google doc link" />
-            </div>
-            <div style={{ flex: "1 1 260px" }}>
-              <Label>gooseflow link</Label>
-              <LinkRow value={c.gooseflowLink} onCommit={(v) => onUpdate({ gooseflowLink: v })} placeholder="paste gooseflow round link" />
-            </div>
+          <div style={{ marginBottom: 14 }}>
+            <Label>neg brief doc</Label>
+            <LinkRow value={c.docLink} onCommit={(v) => onUpdate({ docLink: v })} placeholder="paste google doc link" />
           </div>
 
           {/* Notes */}
@@ -864,11 +1112,15 @@ function CaseCard({
                   flow={f}
                   onUpdate={(patch) => onUpdateFlow(f.id, patch)}
                   onDelete={() => onDeleteFlow(f.id)}
-                  onAddRow={() => onAddRow(f.id)}
-                  onUpdateRow={(rowId, patch) => onUpdateRow(f.id, rowId, patch)}
-                  onUpdateCell={(rowId, speech, val) => onUpdateCell(f.id, rowId, speech, val)}
-                  onDeleteRow={(rowId) => onDeleteRow(f.id, rowId)}
-                  onExport={() => onExportFlow(f)}
+                  onAddCell={(speechId) => onAddCell(f.id, speechId)}
+                  onAddCellAfter={(speechId, cellId) => onAddCellAfter(f.id, speechId, cellId)}
+                  onDeleteCell={(speechId, cellId) => onDeleteCell(f.id, speechId, cellId)}
+                  onAddEmptySpace={(speechId) => onAddEmptySpace(f.id, speechId)}
+                  onDeleteEmptySpace={(speechId, spaceId) => onDeleteEmptySpace(f.id, speechId, spaceId)}
+                  onReorderItems={(speechId, items) => onReorderItems(f.id, speechId, items)}
+                  onUpdateCellContent={(speechId, cellId, content) => onUpdateCellContent(f.id, speechId, cellId, content)}
+                  onAddConnection={(fromCellId, toCellId) => onAddConnection(f.id, fromCellId, toCellId)}
+                  onRemoveConnection={(connId) => onRemoveConnection(f.id, connId)}
                 />
               ))}
               {c.flows.length === 0 && (
@@ -920,7 +1172,13 @@ function LinkRow({ value, onCommit, placeholder }) {
 
 /* -------------------------------- Flow block ------------------------------- */
 
-function FlowBlock({ flow, onUpdate, onDelete, onAddRow, onUpdateRow, onUpdateCell, onDeleteRow, onExport }) {
+function FlowBlock({
+  flow, onUpdate, onDelete,
+  onAddCell, onAddCellAfter, onDeleteCell,
+  onAddEmptySpace, onDeleteEmptySpace,
+  onReorderItems, onUpdateCellContent,
+  onAddConnection, onRemoveConnection,
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -949,9 +1207,6 @@ function FlowBlock({ flow, onUpdate, onDelete, onAddRow, onUpdateRow, onUpdateCe
             padding: "4px 6px",
           }}
         />
-        <button className="cp-btn-icon" onClick={onExport} title="Copy flow as JSON">
-          <Copy size={13} />
-        </button>
         <button className="cp-btn-icon" onClick={onDelete}>
           <Trash2 size={13} />
         </button>
@@ -959,69 +1214,20 @@ function FlowBlock({ flow, onUpdate, onDelete, onAddRow, onUpdateRow, onUpdateCe
 
       {open && (
         <div style={{ marginTop: 12 }}>
-          <div className="cp-scroll" style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 760 }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>arg</th>
-                  {SPEECHES.map((s) => (
-                    <th key={s} style={thStyle}>{s}</th>
-                  ))}
-                  <th style={thStyle}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {flow.rows.map((r) => (
-                  <tr key={r.id}>
-                    <td style={tdStyle}>
-                      <input
-                        className="cp-input"
-                        defaultValue={r.label}
-                        onBlur={(e) => onUpdateRow(r.id, { label: e.target.value })}
-                        placeholder="argument"
-                        style={{ fontSize: 11, fontFamily: "var(--cp-mono)", width: 110 }}
-                      />
-                    </td>
-                    {SPEECHES.map((s) => (
-                      <td key={s} style={tdStyle}>
-                        <textarea
-                          className="cp-textarea"
-                          defaultValue={r.cells[s]}
-                          onBlur={(e) => onUpdateCell(r.id, s, e.target.value)}
-                          rows={2}
-                          style={{ width: 100, padding: 6 }}
-                        />
-                      </td>
-                    ))}
-                    <td style={tdStyle}>
-                      <button className="cp-btn-icon" onClick={() => onDeleteRow(r.id)} style={{ padding: 4 }}>
-                        <X size={12} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <button className="cp-btn" onClick={onAddRow} style={{ padding: "5px 10px", fontSize: 11, marginTop: 8 }}>
-            <Plus size={12} /> add row
-          </button>
+          <FlowBoard
+            flow={flow}
+            onAddCell={onAddCell}
+            onAddCellAfter={onAddCellAfter}
+            onDeleteCell={onDeleteCell}
+            onAddEmptySpace={onAddEmptySpace}
+            onDeleteEmptySpace={onDeleteEmptySpace}
+            onReorderItems={onReorderItems}
+            onUpdateCellContent={onUpdateCellContent}
+            onAddConnection={onAddConnection}
+            onRemoveConnection={onRemoveConnection}
+          />
         </div>
       )}
     </div>
   );
 }
-
-const thStyle = {
-  textAlign: "left",
-  fontFamily: "var(--cp-mono)",
-  fontSize: 10,
-  color: "var(--cp-muted)",
-  letterSpacing: "0.06em",
-  padding: "4px 6px",
-  borderBottom: "1px solid var(--cp-border)",
-};
-const tdStyle = {
-  padding: "4px 6px",
-  verticalAlign: "top",
-};
