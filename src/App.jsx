@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { ref, onValue, set as dbSet } from "firebase/database";
-import { db } from "./firebase.js";
+import { db, authReady } from "./firebase.js";
 import {
   Plus,
   Trash2,
@@ -411,25 +411,33 @@ export default function App() {
   const cardRefs = useRef({});
 
   useEffect(() => {
-    const unsubscribe = onValue(
-      casesRootRef,
-      (snapshot) => {
-        const obj = snapshot.val() || {};
-        const list = Object.values(obj).map((raw) => {
-          try {
-            return normalizeCase(JSON.parse(raw));
-          } catch (e) {
-            return null;
+    let unsubscribe = () => {};
+    authReady
+      .then(() => {
+        unsubscribe = onValue(
+          casesRootRef,
+          (snapshot) => {
+            const obj = snapshot.val() || {};
+            const list = Object.values(obj).map((raw) => {
+              try {
+                return normalizeCase(JSON.parse(raw));
+              } catch (e) {
+                return null;
+              }
+            }).filter(Boolean);
+            list.sort((a, b) => a.createdAt - b.createdAt);
+            setCases(list);
+          },
+          (err) => {
+            console.error("goosebrief read failed:", err);
+            setCases([]);
           }
-        }).filter(Boolean);
-        list.sort((a, b) => a.createdAt - b.createdAt);
-        setCases(list);
-      },
-      (err) => {
-        console.error("goosebrief read failed:", err);
+        );
+      })
+      .catch((err) => {
+        console.error("goosebrief auth failed:", err);
         setCases([]);
-      }
-    );
+      });
     return () => unsubscribe();
   }, []);
 
