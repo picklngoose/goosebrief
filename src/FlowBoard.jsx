@@ -130,7 +130,7 @@ const FlowArgCell = forwardRef(function FlowArgCell(
     const rest = cell.content.slice(idx + firstWord.length);
     return (
       <div className="cp-flow-tag-overlay" aria-hidden="true">
-        <span style={{ color: tag.color, fontWeight: 600 }}>{firstWord}</span>
+        <span style={{ color: tag.color }}>{firstWord}</span>
         <span style={{ color: "var(--cp-text)" }}>{rest}</span>
       </div>
     );
@@ -701,7 +701,7 @@ export function FlowBoard({
               ["Esc", "cancel connection"],
             ].map(([k, d]) => (
               <div key={k} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 6, fontSize: 12, color: "var(--cp-text)" }}>
-                <span style={{ minWidth: 100, fontFamily: "var(--cp-mono)", fontSize: 11, color: "var(--cp-accent)" }}>{k}</span>
+                <span style={{ minWidth: 100, fontFamily: "var(--cp-body)", fontWeight: 600, fontSize: 11, color: "var(--cp-accent)" }}>{k}</span>
                 <span style={{ color: "var(--cp-muted)" }}>{d}</span>
               </div>
             ))}
