@@ -61,7 +61,7 @@ const STRENGTH_META = {
 function StyleBlock() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
 
       .cp-root {
         --cp-bg: #14161a;
@@ -77,7 +77,6 @@ function StyleBlock() {
         --cp-neg: #6f93c9;
         --cp-display: 'Space Grotesk', sans-serif;
         --cp-body: 'Inter', sans-serif;
-        --cp-mono: 'IBM Plex Mono', monospace;
         font-family: var(--cp-body);
       }
       .cp-root * { box-sizing: border-box; }
@@ -129,18 +128,6 @@ function StyleBlock() {
         border-radius: 10px;
         transition: border-color 0.15s ease;
       }
-      .cp-textarea {
-        background: var(--cp-surface2);
-        border: 1px solid var(--cp-border);
-        color: var(--cp-text);
-        border-radius: 6px;
-        font-family: var(--cp-mono);
-        font-size: 12px;
-        outline: none;
-        resize: none;
-        transition: border-color 0.15s ease;
-      }
-      .cp-textarea:focus { border-color: var(--cp-accent); }
       .cp-tag {
         display: inline-flex;
         align-items: center;
@@ -148,8 +135,7 @@ function StyleBlock() {
         background: var(--cp-surface2);
         border: 1px solid var(--cp-border);
         border-radius: 999px;
-        font-family: var(--cp-mono);
-        font-size: 11px;
+        font-size: 12px;
         color: var(--cp-text);
       }
       .cp-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
@@ -171,7 +157,7 @@ function StyleBlock() {
       }
       .cp-flow-col.hovered { background: rgba(255,255,255,0.03); }
       .cp-flow-col-header {
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         font-size: 12px;
         font-weight: 600;
         letter-spacing: 0.02em;
@@ -218,7 +204,7 @@ function StyleBlock() {
         min-height: 28px;
         line-height: 1.45;
         font-size: 11.5px;
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         background: transparent;
         border: none;
         outline: none;
@@ -234,7 +220,7 @@ function StyleBlock() {
         position: absolute;
         inset: 0;
         z-index: 1;
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         font-size: 11.5px;
         line-height: 1.45;
         white-space: pre-wrap;
@@ -254,7 +240,7 @@ function StyleBlock() {
       }
       .cp-flow-placeholder.space { min-height: 16px; padding: 0; }
       .cp-flow-placeholder-text {
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         font-size: 11.5px;
         color: var(--cp-muted);
         white-space: pre-wrap;
@@ -271,7 +257,7 @@ function StyleBlock() {
         min-height: 28px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.5);
         opacity: 0.95;
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         font-size: 11.5px;
         color: var(--cp-text);
         white-space: pre-wrap;
@@ -279,7 +265,7 @@ function StyleBlock() {
       }
       .cp-flow-floating.space { min-height: 16px; padding: 0; opacity: 0.7; }
       .cp-flow-addcell {
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         font-size: 10px;
         padding: 4px;
         border: 1px dashed var(--cp-border);
@@ -302,7 +288,7 @@ function StyleBlock() {
         border-radius: 20px;
         padding: 4px 12px;
         font-size: 10px;
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         color: var(--cp-muted);
         pointer-events: none;
         z-index: 20;
@@ -316,7 +302,7 @@ function StyleBlock() {
         width: 20px;
         height: 20px;
         font-size: 11px;
-        font-family: var(--cp-mono);
+        font-family: var(--cp-body);
         color: var(--cp-muted);
         border: 1px solid var(--cp-border);
         border-radius: 50%;
@@ -664,7 +650,7 @@ export default function App() {
     return (
       <div className="cp-root" style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "360px" }}>
         <StyleBlock />
-        <p style={{ color: "var(--cp-muted)", fontFamily: "var(--cp-mono)", fontSize: 13 }}>
+        <p style={{ color: "var(--cp-muted)", fontFamily: "var(--cp-body)", fontSize: 13 }}>
           loading case list…
         </p>
       </div>
@@ -705,7 +691,7 @@ export default function App() {
             >
               goosebrief
             </h1>
-            <span style={{ fontFamily: "var(--cp-mono)", fontSize: 11, color: "var(--cp-muted)" }}>
+            <span style={{ fontFamily: "var(--cp-body)", fontSize: 11, color: "var(--cp-muted)" }}>
               {saveStatus === "saving" ? "saving…" : saveStatus === "error" ? "save failed" : cases.length ? "saved" : ""}
             </span>
           </div>
@@ -723,7 +709,7 @@ export default function App() {
               borderRadius: 10,
               background: "var(--cp-surface)",
               marginBottom: 20,
-              fontFamily: "var(--cp-mono)",
+              fontFamily: "var(--cp-body)",
               fontSize: 12,
             }}
           >
@@ -765,7 +751,7 @@ export default function App() {
               border: "1px solid var(--cp-border)",
               borderRadius: 8,
               padding: "9px 10px",
-              fontFamily: "var(--cp-mono)",
+              fontFamily: "var(--cp-body)",
               fontSize: 12,
               outline: "none",
             }}
@@ -840,7 +826,7 @@ export default function App() {
                 background: "none",
                 border: "none",
                 color: "var(--cp-muted)",
-                fontFamily: "var(--cp-mono)",
+                fontFamily: "var(--cp-body)",
                 fontSize: 11,
                 cursor: "pointer",
                 textDecoration: "underline",
@@ -934,7 +920,7 @@ function Gate({ onUnlock, rootStyle }) {
           }}
           onKeyDown={(e) => e.key === "Enter" && submit()}
           style={{
-            fontFamily: "var(--cp-mono)",
+            fontFamily: "var(--cp-body)",
             fontSize: 13,
             textAlign: "center",
             border: `1px solid ${error ? "var(--cp-bad)" : "var(--cp-border)"}`,
@@ -951,7 +937,7 @@ function Gate({ onUnlock, rootStyle }) {
           unlock
         </button>
         {error && (
-          <p style={{ color: "var(--cp-bad)", fontSize: 11, fontFamily: "var(--cp-mono)", marginTop: 10 }}>
+          <p style={{ color: "var(--cp-bad)", fontSize: 11, fontFamily: "var(--cp-body)", marginTop: 10 }}>
             wrong passcode
           </p>
         )}
@@ -1003,7 +989,7 @@ function CaseCard({
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
         <span
           style={{
-            fontFamily: "var(--cp-mono)",
+            fontFamily: "var(--cp-body)",
             fontSize: 13,
             color: "var(--cp-muted)",
             paddingTop: 3,
@@ -1028,7 +1014,7 @@ function CaseCard({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6, flexWrap: "wrap", gap: 6 }}>
-            <span style={{ fontFamily: "var(--cp-mono)", fontSize: 11, color: "var(--cp-muted)" }}>
+            <span style={{ fontFamily: "var(--cp-body)", fontSize: 11, color: "var(--cp-muted)" }}>
               {c.teams.length} {c.teams.length === 1 ? "team" : "teams"} running this
             </span>
 
@@ -1095,7 +1081,7 @@ function CaseCard({
                     commitTeam();
                   }
                 }}
-                style={{ width: 140, fontSize: 12, fontFamily: "var(--cp-mono)" }}
+                style={{ width: 140, fontSize: 12, fontFamily: "var(--cp-body)" }}
               />
             </div>
           </div>
@@ -1146,7 +1132,7 @@ function CaseCard({
                 />
               ))}
               {c.flows.length === 0 && (
-                <p style={{ color: "var(--cp-muted)", fontSize: 12, fontFamily: "var(--cp-mono)" }}>
+                <p style={{ color: "var(--cp-muted)", fontSize: 12, fontFamily: "var(--cp-body)" }}>
                   no flows logged against this case yet.
                 </p>
               )}
@@ -1162,7 +1148,7 @@ function Label({ children }) {
   return (
     <div
       style={{
-        fontFamily: "var(--cp-mono)",
+        fontFamily: "var(--cp-body)",
         fontSize: 10,
         letterSpacing: "0.08em",
         color: "var(--cp-muted)",
@@ -1225,7 +1211,7 @@ function FlowBlock({
             border: "1px solid var(--cp-border)",
             color: "var(--cp-muted)",
             borderRadius: 6,
-            fontFamily: "var(--cp-mono)",
+            fontFamily: "var(--cp-body)",
             fontSize: 11,
             padding: "4px 6px",
           }}
