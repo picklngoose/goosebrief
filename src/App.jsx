@@ -158,13 +158,13 @@ function StyleBlock() {
 
       /* Flow board (embedded gooseflow) */
       .cp-flow-col {
-        min-width: 180px;
-        max-width: 220px;
+        min-width: 220px;
+        max-width: 260px;
         flex: 1;
         display: flex;
         flex-direction: column;
         gap: 6px;
-        padding: 4px 8px 6px 4px;
+        padding: 4px 10px 10px 4px;
         border-radius: 8px;
         transition: background 0.15s ease;
         position: relative;
@@ -184,7 +184,7 @@ function StyleBlock() {
       }
       .cp-flow-col-header.aff { color: var(--cp-aff); }
       .cp-flow-col-header.neg { color: var(--cp-neg); }
-      .cp-flow-cells { display: flex; flex-direction: column; gap: 4px; margin-left: 10px; padding-bottom: 4px; }
+      .cp-flow-cells { display: flex; flex-direction: column; gap: 8px; margin-left: 10px; padding-bottom: 8px; }
       .cp-flow-item-wrap { cursor: grab; user-select: none; touch-action: none; border-radius: 6px; }
       .cp-flow-item-wrap:active { cursor: grabbing; }
       .cp-flow-cell {
@@ -193,8 +193,8 @@ function StyleBlock() {
         border-radius: 6px;
         display: flex;
         align-items: flex-start;
-        gap: 4px;
-        padding: 5px 7px 5px 4px;
+        gap: 6px;
+        padding: 7px 9px 7px 5px;
         position: relative;
         transition: border-color 0.15s ease;
       }
@@ -328,6 +328,20 @@ function StyleBlock() {
         background: var(--cp-bg);
       }
       .cp-flow-help-btn:hover { color: var(--cp-text); border-color: var(--cp-accent); }
+
+      /* Native date input calendar icon is nearly invisible on a dark
+         background by default — force it to render light and full-opacity. */
+      .cp-date-input { color-scheme: dark; }
+      .cp-date-input::-webkit-calendar-picker-indicator {
+        filter: invert(1) brightness(1.8);
+        opacity: 1;
+        cursor: pointer;
+        border-radius: 3px;
+        padding: 2px;
+      }
+      .cp-date-input::-webkit-calendar-picker-indicator:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
     `}</style>
   );
 }
@@ -1203,6 +1217,7 @@ function FlowBlock({
         />
         <input
           type="date"
+          className="cp-date-input"
           value={flow.date}
           onChange={(e) => onUpdate({ date: e.target.value })}
           style={{
