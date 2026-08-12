@@ -602,14 +602,14 @@ export function FlowBoard({
       <div
         ref={boardScrollRef}
         className="cp-scroll"
-        style={{ overflow: "auto", maxHeight: 440, border: "1px solid var(--cp-border)", borderRadius: 8, background: "var(--cp-bg)" }}
+        style={{ overflow: "auto", maxHeight: 560, minHeight: 320, border: "1px solid var(--cp-border)", borderRadius: 8, background: "var(--cp-bg)" }}
         onClick={(e) => {
           if (e.target === boardScrollRef.current || e.target === e.currentTarget.firstChild) {
             setPendingFrom([]); setCursor(null);
           }
         }}
       >
-        <div style={{ display: "flex", gap: 8, padding: "10px 12px", alignItems: "stretch", minHeight: "100%", width: "max-content", minWidth: "100%", position: "relative" }}>
+        <div style={{ display: "flex", gap: 20, padding: "28px 30px 140px", alignItems: "stretch", minHeight: "calc(100% + 160px)", width: "max-content", minWidth: "100%", position: "relative" }}>
           <svg ref={svgRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 5 }}>
             <defs>
               <marker id={connMarkerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
