@@ -1,13 +1,19 @@
 import { useState, useEffect, useRef } from "react";
-import { ref, onValue, set as dbSet } from "firebase/database";
-import { db, authReady } from "./firebase.js";
+import { ref, get, onValue, set as dbSet } from "firebase/database";
+import { onAuthStateChanged } from "firebase/auth";
+import { db, auth, signInWithGoogle, signOutOfGoogle } from "./firebase.js";
 import {
   Plus,
   Trash2,
   ChevronDown,
   ChevronUp,
+  ChevronsUpDown,
   ExternalLink,
   Search,
+  Users,
+  LogOut,
+  Copy,
+  RefreshCw,
   X,
 } from "lucide-react";
 import { uid } from "./utils.js";
@@ -18,12 +24,18 @@ import {
   normalizeFlowSpeeches,
   normalizeFlowConnections,
 } from "./FlowBoard.jsx";
+import {
+  createCaselist,
+  joinCaselist,
+  leaveCaselist,
+  removeMember,
+  regenerateJoinCode,
+  importLegacyCases,
+} from "./caselist.js";
 
-// Shared team passcode. This is a friction layer, not real security — the
-// database itself is still open to anyone who has the URL. Change this to
-// whatever your team wants before you share the link.
-const TEAM_PASSCODE = "goosebrief2026";
-const GATE_KEY = "gb-unlocked";
+// Which caselist this browser was last looking at, so returning users land
+// back where they were instead of re-picking every visit.
+const ACTIVE_CASELIST_KEY = "gb-active-caselist";
 
 function makeFlow() {
   return {
@@ -334,8 +346,6 @@ function StyleBlock() {
 
 /* ---------------------------------- App ---------------------------------- */
 
-const casesRootRef = ref(db, "casesById");
-
 // Firebase Realtime Database silently drops empty arrays/objects and can
 // reshape arrays into keyed objects. Storing each case as a JSON string
 // value sidesteps all of that — it's just a blob to Firebase either way.
@@ -392,13 +402,22 @@ function normalizeFlow(f) {
 }
 
 export default function App() {
-  const [unlocked, setUnlocked] = useState(() => {
+  // undefined = auth state still loading, null = signed out, object = signed in
+  const [user, setUser] = useState(undefined);
+  // null = still loading; object keyed by caselistId once loaded
+  const [myCaselists, setMyCaselists] = useState(null);
+  const [activeCaselistId, setActiveCaselistId] = useState(() => {
     try {
-      return localStorage.getItem(GATE_KEY) === "1";
+      return localStorage.getItem(ACTIVE_CASELIST_KEY) || null;
     } catch (e) {
-      return false;
+      return null;
     }
   });
+  const [caselistMeta, setCaselistMeta] = useState(null);
+  const [showSwitcher, setShowSwitcher] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
+  const [legacyCount, setLegacyCount] = useState(0);
+
   const [cases, setCases] = useState(null);
   const [sortMode, setSortMode] = useState("priority");
   const [query, setQuery] = useState("");
@@ -410,36 +429,126 @@ export default function App() {
   const pendingWrites = useRef(0);
   const cardRefs = useRef({});
 
+  // --- Auth state ---
   useEffect(() => {
-    let unsubscribe = () => {};
-    authReady
-      .then(() => {
-        unsubscribe = onValue(
-          casesRootRef,
-          (snapshot) => {
-            const obj = snapshot.val() || {};
-            const list = Object.values(obj).map((raw) => {
-              try {
-                return normalizeCase(JSON.parse(raw));
-              } catch (e) {
-                return null;
-              }
-            }).filter(Boolean);
-            list.sort((a, b) => a.createdAt - b.createdAt);
-            setCases(list);
-          },
-          (err) => {
-            console.error("goosebrief read failed:", err);
-            setCases([]);
-          }
-        );
-      })
-      .catch((err) => {
-        console.error("goosebrief auth failed:", err);
-        setCases([]);
-      });
+    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
     return () => unsubscribe();
   }, []);
+
+  // --- Which caselists this signed-in user belongs to ---
+  useEffect(() => {
+    if (!user) {
+      setMyCaselists(null);
+      return;
+    }
+    const r = ref(db, `userCaselists/${user.uid}`);
+    const unsubscribe = onValue(
+      r,
+      (snap) => setMyCaselists(snap.val() || {}),
+      () => setMyCaselists({})
+    );
+    return () => unsubscribe();
+  }, [user]);
+
+  // Auto-pick the active caselist once we know the list: keep a
+  // previously-remembered choice if it's still valid, auto-select if
+  // there's exactly one, otherwise fall back to the picker screen.
+  useEffect(() => {
+    if (!myCaselists) return;
+    const ids = Object.keys(myCaselists);
+    if (activeCaselistId && !myCaselists[activeCaselistId]) {
+      setActiveCaselistId(ids.length === 1 ? ids[0] : null);
+    } else if (!activeCaselistId && ids.length === 1) {
+      setActiveCaselistId(ids[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myCaselists]);
+
+  useEffect(() => {
+    try {
+      if (activeCaselistId) localStorage.setItem(ACTIVE_CASELIST_KEY, activeCaselistId);
+      else localStorage.removeItem(ACTIVE_CASELIST_KEY);
+    } catch (e) {
+      /* ignore */
+    }
+  }, [activeCaselistId]);
+
+  // One-time check for data left over from before caselists existed, so
+  // the "create caselist" screen can offer to import it.
+  useEffect(() => {
+    if (!user) return;
+    get(ref(db, "casesById"))
+      .then((snap) => {
+        const obj = snap.val();
+        setLegacyCount(obj ? Object.keys(obj).length : 0);
+      })
+      .catch(() => setLegacyCount(0));
+  }, [user]);
+
+  // Called if a read for the active caselist suddenly starts failing —
+  // almost always because the owner removed this person's membership.
+  // Cleans up the stale local index entry (only a user's own userCaselists
+  // writes are permitted by the rules) and drops back to the picker.
+  function handleLostAccess() {
+    if (user && activeCaselistId) {
+      dbSet(ref(db, `userCaselists/${user.uid}/${activeCaselistId}`), null).catch(() => {});
+    }
+    setActiveCaselistId(null);
+    showToast("you no longer have access to that caselist");
+  }
+
+  // --- Active caselist's metadata (name, join code, owner) ---
+  useEffect(() => {
+    if (!activeCaselistId) {
+      setCaselistMeta(null);
+      return;
+    }
+    const r = ref(db, `caselists/${activeCaselistId}/meta`);
+    const unsubscribe = onValue(
+      r,
+      (snap) => setCaselistMeta(snap.val()),
+      () => {
+        setCaselistMeta(null);
+        handleLostAccess();
+      }
+    );
+    return () => unsubscribe();
+  }, [activeCaselistId]);
+
+  // --- Cases for the active caselist ---
+  useEffect(() => {
+    if (!activeCaselistId) {
+      setCases(null);
+      return;
+    }
+    setCases(null);
+    const r = ref(db, `caselists/${activeCaselistId}/casesById`);
+    const unsubscribe = onValue(
+      r,
+      (snapshot) => {
+        const obj = snapshot.val() || {};
+        const list = Object.values(obj).map((raw) => {
+          try {
+            return normalizeCase(JSON.parse(raw));
+          } catch (e) {
+            return null;
+          }
+        }).filter(Boolean);
+        list.sort((a, b) => a.createdAt - b.createdAt);
+        setCases(list);
+      },
+      (err) => {
+        console.error("goosebrief read failed:", err);
+        setCases([]);
+        handleLostAccess();
+      }
+    );
+    return () => unsubscribe();
+  }, [activeCaselistId]);
+
+  function casePath(id) {
+    return `caselists/${activeCaselistId}/casesById/${id}`;
+  }
 
   // Writes only the one case that changed, to its own Firebase key, so
   // editing case A can never overwrite a concurrent edit to case B.
@@ -450,7 +559,7 @@ export default function App() {
     setSaveStatus("saving");
     writeTimers.current[id] = setTimeout(async () => {
       try {
-        await dbSet(ref(db, `casesById/${id}`), JSON.stringify(caseObj));
+        await dbSet(ref(db, casePath(id)), JSON.stringify(caseObj));
       } catch (e) {
         console.error("goosebrief save failed:", e);
         showToast(`save failed: ${e.code || e.message || "unknown error"}`);
@@ -483,10 +592,10 @@ export default function App() {
   function deleteCase(id) {
     const target = cases.find((c) => c.id === id);
     const label = target?.name?.trim() ? `"${target.name.trim()}"` : "this case";
-    if (!window.confirm(`delete ${label} for everyone? this can't be undone.`)) return;
+    if (!window.confirm(`delete ${label} for everyone in this caselist? this can't be undone.`)) return;
     if (writeTimers.current[id]) clearTimeout(writeTimers.current[id]);
     setCases((prev) => prev.filter((c) => c.id !== id));
-    dbSet(ref(db, `casesById/${id}`), null).catch((e) => {
+    dbSet(ref(db, casePath(id)), null).catch((e) => {
       console.error("goosebrief delete failed:", e);
       showToast(`delete failed: ${e.code || e.message || "unknown error"}`);
     });
@@ -622,11 +731,11 @@ export default function App() {
   }
 
   function clearAll() {
-    if (window.confirm("delete every case and flow for everyone? this can't be undone.")) {
+    if (window.confirm("delete every case and flow in this caselist for everyone? this can't be undone.")) {
       Object.values(writeTimers.current).forEach(clearTimeout);
       writeTimers.current = {};
       setCases([]);
-      dbSet(casesRootRef, null).catch((e) => {
+      dbSet(ref(db, `caselists/${activeCaselistId}/casesById`), null).catch((e) => {
         console.error("goosebrief clear failed:", e);
         showToast(`clear failed: ${e.code || e.message || "unknown error"}`);
       });
@@ -642,19 +751,33 @@ export default function App() {
     padding: "32px 20px 80px",
   };
 
-  if (!unlocked) {
-    return <Gate onUnlock={() => setUnlocked(true)} rootStyle={rootStyle} />;
+  if (user === undefined) {
+    return <LoadingScreen rootStyle={rootStyle} text="loading…" />;
   }
 
-  if (cases === null) {
+  if (user === null) {
+    return <SignInScreen rootStyle={rootStyle} />;
+  }
+
+  if (myCaselists === null) {
+    return <LoadingScreen rootStyle={rootStyle} text="loading your caselists…" />;
+  }
+
+  if (!activeCaselistId) {
     return (
-      <div className="cp-root" style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "360px" }}>
-        <StyleBlock />
-        <p style={{ color: "var(--cp-muted)", fontFamily: "var(--cp-body)", fontSize: 13 }}>
-          loading case list…
-        </p>
-      </div>
+      <CaselistPicker
+        rootStyle={rootStyle}
+        user={user}
+        myCaselists={myCaselists}
+        legacyCount={legacyCount}
+        onSelect={(id) => setActiveCaselistId(id)}
+        onSignOut={() => signOutOfGoogle()}
+      />
     );
+  }
+
+  if (cases === null || !caselistMeta) {
+    return <LoadingScreen rootStyle={rootStyle} text="loading case list…" />;
   }
 
   const maxTeams = Math.max(1, ...cases.map((c) => c.teams.length));
@@ -695,6 +818,14 @@ export default function App() {
               {saveStatus === "saving" ? "saving…" : saveStatus === "error" ? "save failed" : cases.length ? "saved" : ""}
             </span>
           </div>
+          <CaselistBar
+            meta={caselistMeta}
+            user={user}
+            multipleCaselists={Object.keys(myCaselists).length > 1}
+            onSwitch={() => setShowSwitcher(true)}
+            onMembers={() => setShowMembers(true)}
+            onSignOut={() => signOutOfGoogle()}
+          />
         </div>
 
         {/* Stats */}
@@ -858,26 +989,90 @@ export default function App() {
           {toast}
         </div>
       )}
+
+      {showSwitcher && (
+        <CaselistSwitcherModal
+          myCaselists={myCaselists}
+          activeCaselistId={activeCaselistId}
+          onClose={() => setShowSwitcher(false)}
+          onSelect={(id) => {
+            setActiveCaselistId(id);
+            setShowSwitcher(false);
+          }}
+        />
+      )}
+
+      {showMembers && (
+        <MembersModal
+          caselistId={activeCaselistId}
+          meta={caselistMeta}
+          user={user}
+          onClose={() => setShowMembers(false)}
+          onLeft={() => {
+            setShowMembers(false);
+            setActiveCaselistId(null);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-/* ---------------------------------- Gate ---------------------------------- */
+/* ----------------------------- Auth & caselists ----------------------------- */
 
-function Gate({ onUnlock, rootStyle }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState(false);
+function LoadingScreen({ rootStyle, text }) {
+  return (
+    <div
+      className="cp-root"
+      style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}
+    >
+      <StyleBlock />
+      <p style={{ color: "var(--cp-muted)", fontFamily: "var(--cp-body)", fontSize: 13 }}>{text}</p>
+    </div>
+  );
+}
 
-  function submit() {
-    if (value.trim().toLowerCase() === TEAM_PASSCODE.trim().toLowerCase()) {
-      try {
-        localStorage.setItem(GATE_KEY, "1");
-      } catch (e) {
-        /* ignore */
+// A plain circle-and-letter mark rather than Google's actual four-color
+// logomark — avoids reproducing a trademarked asset while still reading
+// clearly as "this button is for Google" next to the button's own label.
+function GoogleGIcon() {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 16,
+        height: 16,
+        borderRadius: "50%",
+        background: "#4285F4",
+        color: "#fff",
+        fontSize: 11,
+        fontWeight: 700,
+        fontFamily: "var(--cp-display)",
+        flexShrink: 0,
+      }}
+    >
+      G
+    </span>
+  );
+}
+
+function SignInScreen({ rootStyle }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function handleSignIn() {
+    setError("");
+    setBusy(true);
+    try {
+      await signInWithGoogle();
+    } catch (e) {
+      if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
+        setError("sign-in didn't go through — try again");
       }
-      onUnlock();
-    } else {
-      setError(true);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -890,57 +1085,468 @@ function Gate({ onUnlock, rootStyle }) {
       <div
         style={{
           width: "100%",
-          maxWidth: 320,
+          maxWidth: 340,
           border: "1px solid var(--cp-border)",
           background: "var(--cp-surface)",
           borderRadius: 10,
-          padding: 24,
+          padding: 28,
           textAlign: "center",
         }}
       >
-        <h1
-          style={{
-            fontFamily: "var(--cp-display)",
-            fontWeight: 700,
-            fontSize: 22,
-            margin: "0 0 16px",
-          }}
-        >
+        <h1 style={{ fontFamily: "var(--cp-display)", fontWeight: 700, fontSize: 22, margin: "0 0 8px" }}>
           goosebrief
         </h1>
-        <input
-          className="cp-input"
-          type="password"
-          autoFocus
-          placeholder="team passcode"
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setError(false);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          style={{
-            fontFamily: "var(--cp-body)",
-            fontSize: 13,
-            textAlign: "center",
-            border: `1px solid ${error ? "var(--cp-bad)" : "var(--cp-border)"}`,
-            borderRadius: 6,
-            padding: "8px 10px",
-            marginBottom: 12,
-          }}
-        />
+        <p style={{ color: "var(--cp-muted)", fontSize: 13, margin: "0 0 20px" }}>
+          sign in to access your team's caselists
+        </p>
         <button
           className="cp-btn"
-          onClick={submit}
-          style={{ width: "100%", justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600 }}
+          onClick={handleSignIn}
+          disabled={busy}
+          style={{ width: "100%", justifyContent: "center", gap: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
         >
-          unlock
+          <GoogleGIcon /> {busy ? "signing in…" : "sign in with Google"}
         </button>
-        {error && (
-          <p style={{ color: "var(--cp-bad)", fontSize: 11, fontFamily: "var(--cp-body)", marginTop: 10 }}>
-            wrong passcode
+        {error && <p style={{ color: "var(--cp-bad)", fontSize: 11, marginTop: 12 }}>{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+function CaselistPicker({ rootStyle, user, myCaselists, legacyCount, onSelect, onSignOut }) {
+  const [mode, setMode] = useState("choose"); // choose | create | join
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [importAfterCreate, setImportAfterCreate] = useState(true);
+  const [result, setResult] = useState(null);
+
+  const ids = Object.keys(myCaselists);
+
+  async function handleCreate() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await createCaselist(user, name);
+      if (importAfterCreate && legacyCount > 0) {
+        await importLegacyCases(res.caselistId);
+      }
+      setResult(res);
+    } catch (e) {
+      setError(e.message || "couldn't create caselist");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleJoin() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await joinCaselist(user, name, code);
+      onSelect(res.caselistId);
+    } catch (e) {
+      setError(e.message || "couldn't join caselist");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const inputStyle = {
+    fontSize: 13,
+    border: "1px solid var(--cp-border)",
+    borderRadius: 6,
+    padding: "8px 10px",
+    marginTop: 4,
+    marginBottom: 12,
+  };
+
+  if (result) {
+    return (
+      <div
+        className="cp-root"
+        style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}
+      >
+        <StyleBlock />
+        <div
+          style={{
+            width: "100%",
+            maxWidth: 380,
+            border: "1px solid var(--cp-accent)",
+            background: "var(--cp-surface)",
+            borderRadius: 10,
+            padding: 24,
+            textAlign: "center",
+          }}
+        >
+          <h1 style={{ fontFamily: "var(--cp-display)", fontWeight: 700, fontSize: 20, margin: "0 0 4px" }}>
+            {result.name} is ready
+          </h1>
+          <p style={{ color: "var(--cp-muted)", fontSize: 12, margin: "0 0 16px" }}>
+            share this join code with your team — they'll need the caselist name and this code to get in.
           </p>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 20 }}>
+            <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "0.1em", color: "var(--cp-accent)" }}>
+              {result.joinCode}
+            </span>
+            <button className="cp-btn-icon" onClick={() => navigator.clipboard.writeText(result.joinCode)} title="copy code">
+              <Copy size={14} />
+            </button>
+          </div>
+          <button
+            className="cp-btn"
+            onClick={() => onSelect(result.caselistId)}
+            style={{ width: "100%", justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600 }}
+          >
+            enter {result.name}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="cp-root"
+      style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}
+    >
+      <StyleBlock />
+      <div style={{ width: "100%", maxWidth: 380, border: "1px solid var(--cp-border)", background: "var(--cp-surface)", borderRadius: 10, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+          {user.photoURL && <img src={user.photoURL} alt="" style={{ width: 28, height: 28, borderRadius: "50%" }} />}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {user.displayName || user.email}
+            </div>
+          </div>
+          <button className="cp-btn-icon" onClick={onSignOut} title="sign out">
+            <LogOut size={14} />
+          </button>
+        </div>
+
+        {ids.length > 0 && mode === "choose" && (
+          <div style={{ marginBottom: 18 }}>
+            <Label>your caselists</Label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+              {ids.map((id) => (
+                <button
+                  key={id}
+                  className="cp-btn"
+                  onClick={() => onSelect(id)}
+                  style={{ justifyContent: "space-between", padding: "9px 12px", fontSize: 13 }}
+                >
+                  {myCaselists[id].name}
+                  <span style={{ fontSize: 10, color: "var(--cp-muted)" }}>{myCaselists[id].role}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         )}
+
+        {mode === "choose" && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="cp-btn" onClick={() => setMode("create")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
+              <Plus size={13} /> create caselist
+            </button>
+            <button className="cp-btn" onClick={() => setMode("join")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
+              join caselist
+            </button>
+          </div>
+        )}
+
+        {mode === "create" && (
+          <div>
+            <Label>caselist name</Label>
+            <input
+              className="cp-input"
+              autoFocus
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setError("");
+              }}
+              placeholder="e.g. lincoln-debate-2026"
+              style={{ ...inputStyle, width: "100%" }}
+            />
+            {legacyCount > 0 && (
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--cp-muted)", marginBottom: 14, cursor: "pointer" }}>
+                <input type="checkbox" checked={importAfterCreate} onChange={(e) => setImportAfterCreate(e.target.checked)} />
+                import {legacyCount} existing case{legacyCount === 1 ? "" : "s"} from before caselists
+              </label>
+            )}
+            {error && <p style={{ color: "var(--cp-bad)", fontSize: 11, marginBottom: 10 }}>{error}</p>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="cp-btn-icon"
+                onClick={() => {
+                  setMode("choose");
+                  setError("");
+                }}
+                style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
+              >
+                back
+              </button>
+              <button
+                className="cp-btn"
+                disabled={busy || !name.trim()}
+                onClick={handleCreate}
+                style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
+              >
+                {busy ? "creating…" : "create"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === "join" && (
+          <div>
+            <Label>caselist name</Label>
+            <input
+              className="cp-input"
+              autoFocus
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setError("");
+              }}
+              placeholder="ask whoever created it"
+              style={{ ...inputStyle, width: "100%" }}
+            />
+            <Label>join code</Label>
+            <input
+              className="cp-input"
+              value={code}
+              onChange={(e) => {
+                setCode(e.target.value);
+                setError("");
+              }}
+              placeholder="6-character code"
+              style={{ ...inputStyle, width: "100%", textTransform: "uppercase", letterSpacing: "0.08em" }}
+            />
+            {error && <p style={{ color: "var(--cp-bad)", fontSize: 11, marginBottom: 10 }}>{error}</p>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="cp-btn-icon"
+                onClick={() => {
+                  setMode("choose");
+                  setError("");
+                }}
+                style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
+              >
+                back
+              </button>
+              <button
+                className="cp-btn"
+                disabled={busy || !name.trim() || !code.trim()}
+                onClick={handleJoin}
+                style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
+              >
+                {busy ? "joining…" : "join"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CaselistBar({ meta, user, multipleCaselists, onSwitch, onMembers, onSignOut }) {
+  if (!meta) return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12, color: "var(--cp-muted)" }}>
+        caselist: <strong style={{ color: "var(--cp-text)", fontWeight: 600 }}>{meta.name}</strong>
+      </span>
+      {multipleCaselists && (
+        <button
+          className="cp-btn-icon"
+          onClick={onSwitch}
+          title="switch caselist"
+          style={{ border: "1px solid var(--cp-border)", padding: "3px 7px", gap: 4, fontSize: 11 }}
+        >
+          <ChevronsUpDown size={11} /> switch
+        </button>
+      )}
+      <button
+        className="cp-btn-icon"
+        onClick={onMembers}
+        title="members & join code"
+        style={{ border: "1px solid var(--cp-border)", padding: "3px 7px", gap: 4, fontSize: 11 }}
+      >
+        <Users size={11} /> members
+      </button>
+      <span style={{ flex: 1 }} />
+      {user.photoURL && <img src={user.photoURL} alt="" style={{ width: 20, height: 20, borderRadius: "50%" }} />}
+      <button className="cp-btn-icon" onClick={onSignOut} title="sign out" style={{ padding: 4 }}>
+        <LogOut size={13} />
+      </button>
+    </div>
+  );
+}
+
+function CaselistSwitcherModal({ myCaselists, activeCaselistId, onClose, onSelect }) {
+  const ids = Object.keys(myCaselists);
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+    >
+      <div className="cp-card" onClick={(e) => e.stopPropagation()} style={{ padding: 20, width: "100%", maxWidth: 340 }}>
+        <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15, marginBottom: 12 }}>switch caselist</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {ids.map((id) => (
+            <button
+              key={id}
+              className="cp-btn"
+              onClick={() => onSelect(id)}
+              style={{
+                justifyContent: "space-between",
+                padding: "9px 12px",
+                fontSize: 13,
+                borderColor: id === activeCaselistId ? "var(--cp-accent)" : "var(--cp-border)",
+              }}
+            >
+              {myCaselists[id].name}
+              <span style={{ fontSize: 10, color: "var(--cp-muted)" }}>{myCaselists[id].role}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MembersModal({ caselistId, meta, user, onClose, onLeft }) {
+  const [members, setMembers] = useState(null);
+  const [code, setCode] = useState(meta?.joinCode || "");
+  const [busy, setBusy] = useState(false);
+  const myUid = user.uid;
+
+  useEffect(() => {
+    const r = ref(db, `caselists/${caselistId}/members`);
+    const unsubscribe = onValue(r, (snap) => setMembers(snap.val() || {}));
+    return () => unsubscribe();
+  }, [caselistId]);
+
+  useEffect(() => {
+    setCode(meta?.joinCode || "");
+  }, [meta?.joinCode]);
+
+  const isOwner = meta?.ownerUid === myUid;
+
+  async function handleRegenerate() {
+    setBusy(true);
+    try {
+      const newCode = await regenerateJoinCode(caselistId);
+      setCode(newCode);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemove(memberUid) {
+    if (!window.confirm("remove this person's access to the caselist?")) return;
+    await removeMember(caselistId, memberUid);
+  }
+
+  async function handleLeave() {
+    const warning = isOwner
+      ? "you're the owner — leaving won't transfer ownership, and no one else will be able to manage members or the join code afterward. leave anyway?"
+      : "leave this caselist? you'll need the join code to get back in.";
+    if (!window.confirm(warning)) return;
+    setBusy(true);
+    try {
+      await leaveCaselist(user, caselistId);
+      onLeft();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+    >
+      <div className="cp-card" onClick={(e) => e.stopPropagation()} style={{ padding: 20, width: "100%", maxWidth: 400, maxHeight: "80vh", overflow: "auto" }}>
+        <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15, marginBottom: 4 }}>{meta?.name}</div>
+        <div style={{ fontSize: 11, color: "var(--cp-muted)", marginBottom: 16 }}>
+          {members ? Object.keys(members).length : "…"} member{members && Object.keys(members).length === 1 ? "" : "s"}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 12px",
+            border: "1px solid var(--cp-border)",
+            borderRadius: 8,
+            marginBottom: 16,
+            background: "var(--cp-surface2)",
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10, color: "var(--cp-muted)", marginBottom: 2 }}>join code</div>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "0.1em" }}>{code}</div>
+          </div>
+          <button className="cp-btn-icon" onClick={() => navigator.clipboard.writeText(code)} title="copy code">
+            <Copy size={14} />
+          </button>
+          {isOwner && (
+            <button className="cp-btn-icon" onClick={handleRegenerate} disabled={busy} title="generate a new code">
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+          {members &&
+            Object.entries(members).map(([memberUid, m]) => (
+              <div key={memberUid} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {m.photoURL ? (
+                  <img src={m.photoURL} alt="" style={{ width: 24, height: 24, borderRadius: "50%" }} />
+                ) : (
+                  <div style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--cp-surface2)" }} />
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {m.displayName}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--cp-muted)" }}>
+                    {m.role}
+                    {memberUid === myUid ? " · you" : ""}
+                  </div>
+                </div>
+                {isOwner && memberUid !== myUid && (
+                  <button className="cp-btn-icon" onClick={() => handleRemove(memberUid)} title="remove">
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+        </div>
+
+        <button
+          onClick={handleLeave}
+          disabled={busy}
+          style={{
+            width: "100%",
+            textAlign: "center",
+            padding: "8px 0",
+            fontSize: 12,
+            color: "var(--cp-bad)",
+            background: "transparent",
+            border: "1px solid var(--cp-border)",
+            borderRadius: 6,
+            cursor: "pointer",
+            opacity: busy ? 0.6 : 1,
+          }}
+        >
+          leave this caselist
+        </button>
       </div>
     </div>
   );
