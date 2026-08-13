@@ -450,19 +450,21 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // Auto-pick the active caselist once we know the list: keep a
-  // previously-remembered choice if it's still valid, auto-select if
-  // there's exactly one, otherwise fall back to the picker screen.
+  // Auto-select the active caselist once we know the list, but only ever
+  // to fill in a *missing* choice (nothing remembered, or exactly one
+  // caselist to begin with). We deliberately never demote an
+  // already-set activeCaselistId here — right after creating or joining a
+  // caselist, this list can still be one render behind the write that
+  // just happened, and treating that lag as "invalid" would bounce the
+  // person straight back to the picker. Genuine loss of access (kicked,
+  // left) is instead caught for real by handleLostAccess below, which
+  // reacts to an actual permission-denied read rather than racing local
+  // state.
   useEffect(() => {
-    if (!myCaselists) return;
+    if (!myCaselists || activeCaselistId) return;
     const ids = Object.keys(myCaselists);
-    if (activeCaselistId && !myCaselists[activeCaselistId]) {
-      setActiveCaselistId(ids.length === 1 ? ids[0] : null);
-    } else if (!activeCaselistId && ids.length === 1) {
-      setActiveCaselistId(ids[0]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [myCaselists]);
+    if (ids.length === 1) setActiveCaselistId(ids[0]);
+  }, [myCaselists, activeCaselistId]);
 
   useEffect(() => {
     try {
@@ -821,7 +823,6 @@ export default function App() {
           <CaselistBar
             meta={caselistMeta}
             user={user}
-            multipleCaselists={Object.keys(myCaselists).length > 1}
             onSwitch={() => setShowSwitcher(true)}
             onMembers={() => setShowMembers(true)}
             onSignOut={() => signOutOfGoogle()}
@@ -992,7 +993,9 @@ export default function App() {
 
       {showSwitcher && (
         <CaselistSwitcherModal
+          user={user}
           myCaselists={myCaselists}
+          legacyCount={legacyCount}
           activeCaselistId={activeCaselistId}
           onClose={() => setShowSwitcher(false)}
           onSelect={(id) => {
@@ -1113,7 +1116,11 @@ function SignInScreen({ rootStyle }) {
   );
 }
 
-function CaselistPicker({ rootStyle, user, myCaselists, legacyCount, onSelect, onSignOut }) {
+// Shared list-and-forms UI for choosing, creating, or joining a caselist.
+// Used both as the full-page picker (before any caselist is active) and
+// embedded in a modal (to join/create an additional one while already
+// working in a caselist) — the two call sites just wrap it differently.
+function CaselistManager({ user, myCaselists, legacyCount, activeCaselistId, onSelect }) {
   const [mode, setMode] = useState("choose"); // choose | create | join
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
@@ -1162,50 +1169,180 @@ function CaselistPicker({ rootStyle, user, myCaselists, legacyCount, onSelect, o
     marginBottom: 12,
   };
 
+  const errorStyle = {
+    color: "var(--cp-bad)",
+    fontSize: 12,
+    background: "rgba(193, 88, 74, 0.12)",
+    border: "1px solid var(--cp-bad)",
+    borderRadius: 6,
+    padding: "8px 10px",
+    marginBottom: 10,
+  };
+
   if (result) {
     return (
-      <div
-        className="cp-root"
-        style={{ ...rootStyle, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}
-      >
-        <StyleBlock />
-        <div
-          style={{
-            width: "100%",
-            maxWidth: 380,
-            border: "1px solid var(--cp-accent)",
-            background: "var(--cp-surface)",
-            borderRadius: 10,
-            padding: 24,
-            textAlign: "center",
-          }}
-        >
-          <h1 style={{ fontFamily: "var(--cp-display)", fontWeight: 700, fontSize: 20, margin: "0 0 4px" }}>
-            {result.name} is ready
-          </h1>
-          <p style={{ color: "var(--cp-muted)", fontSize: 12, margin: "0 0 16px" }}>
-            share this join code with your team — they'll need the caselist name and this code to get in.
-          </p>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 20 }}>
-            <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "0.1em", color: "var(--cp-accent)" }}>
-              {result.joinCode}
-            </span>
-            <button className="cp-btn-icon" onClick={() => navigator.clipboard.writeText(result.joinCode)} title="copy code">
-              <Copy size={14} />
-            </button>
-          </div>
-          <button
-            className="cp-btn"
-            onClick={() => onSelect(result.caselistId)}
-            style={{ width: "100%", justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600 }}
-          >
-            enter {result.name}
+      <div style={{ textAlign: "center" }}>
+        <h1 style={{ fontFamily: "var(--cp-display)", fontWeight: 700, fontSize: 20, margin: "0 0 4px" }}>
+          {result.name} is ready
+        </h1>
+        <p style={{ color: "var(--cp-muted)", fontSize: 12, margin: "0 0 16px" }}>
+          share this join code with your team — they'll need the caselist name and this code to get in.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 20 }}>
+          <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "0.1em", color: "var(--cp-accent)" }}>
+            {result.joinCode}
+          </span>
+          <button className="cp-btn-icon" onClick={() => navigator.clipboard.writeText(result.joinCode)} title="copy code">
+            <Copy size={14} />
           </button>
         </div>
+        <button
+          className="cp-btn"
+          onClick={() => onSelect(result.caselistId)}
+          style={{ width: "100%", justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600 }}
+        >
+          enter {result.name}
+        </button>
       </div>
     );
   }
 
+  return (
+    <div>
+      {ids.length > 0 && mode === "choose" && (
+        <div style={{ marginBottom: 18 }}>
+          <Label>your caselists</Label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {ids.map((id) => (
+              <button
+                key={id}
+                className="cp-btn"
+                onClick={() => onSelect(id)}
+                style={{
+                  justifyContent: "space-between",
+                  padding: "9px 12px",
+                  fontSize: 13,
+                  borderColor: id === activeCaselistId ? "var(--cp-accent)" : "var(--cp-border)",
+                }}
+              >
+                {myCaselists[id].name}
+                <span style={{ fontSize: 10, color: "var(--cp-muted)" }}>
+                  {id === activeCaselistId ? "current" : myCaselists[id].role}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mode === "choose" && (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="cp-btn" onClick={() => setMode("create")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
+            <Plus size={13} /> create caselist
+          </button>
+          <button className="cp-btn" onClick={() => setMode("join")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
+            join caselist
+          </button>
+        </div>
+      )}
+
+      {mode === "create" && (
+        <div>
+          <Label>caselist name</Label>
+          <input
+            className="cp-input"
+            autoFocus
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError("");
+            }}
+            placeholder="e.g. lincoln-debate-2026"
+            style={{ ...inputStyle, width: "100%" }}
+          />
+          {legacyCount > 0 && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--cp-muted)", marginBottom: 14, cursor: "pointer" }}>
+              <input type="checkbox" checked={importAfterCreate} onChange={(e) => setImportAfterCreate(e.target.checked)} />
+              import {legacyCount} existing case{legacyCount === 1 ? "" : "s"} from before caselists
+            </label>
+          )}
+          {error && <p style={errorStyle}>{error}</p>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="cp-btn-icon"
+              onClick={() => {
+                setMode("choose");
+                setError("");
+              }}
+              style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
+            >
+              back
+            </button>
+            <button
+              className="cp-btn"
+              disabled={busy || !name.trim()}
+              onClick={handleCreate}
+              style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
+            >
+              {busy ? "creating…" : "create"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === "join" && (
+        <div>
+          <Label>caselist name</Label>
+          <input
+            className="cp-input"
+            autoFocus
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError("");
+            }}
+            placeholder="ask whoever created it"
+            style={{ ...inputStyle, width: "100%" }}
+          />
+          <Label>join code</Label>
+          <input
+            className="cp-input"
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value);
+              setError("");
+            }}
+            placeholder="6-character code"
+            style={{ ...inputStyle, width: "100%", textTransform: "uppercase", letterSpacing: "0.08em" }}
+          />
+          {error && <p style={errorStyle}>{error}</p>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="cp-btn-icon"
+              onClick={() => {
+                setMode("choose");
+                setError("");
+              }}
+              style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
+            >
+              back
+            </button>
+            <button
+              className="cp-btn"
+              disabled={busy || !name.trim() || !code.trim()}
+              onClick={handleJoin}
+              style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
+            >
+              {busy ? "joining…" : "join"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CaselistPicker({ rootStyle, user, myCaselists, legacyCount, onSelect, onSignOut }) {
   return (
     <div
       className="cp-root"
@@ -1224,151 +1361,27 @@ function CaselistPicker({ rootStyle, user, myCaselists, legacyCount, onSelect, o
             <LogOut size={14} />
           </button>
         </div>
-
-        {ids.length > 0 && mode === "choose" && (
-          <div style={{ marginBottom: 18 }}>
-            <Label>your caselists</Label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-              {ids.map((id) => (
-                <button
-                  key={id}
-                  className="cp-btn"
-                  onClick={() => onSelect(id)}
-                  style={{ justifyContent: "space-between", padding: "9px 12px", fontSize: 13 }}
-                >
-                  {myCaselists[id].name}
-                  <span style={{ fontSize: 10, color: "var(--cp-muted)" }}>{myCaselists[id].role}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {mode === "choose" && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="cp-btn" onClick={() => setMode("create")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
-              <Plus size={13} /> create caselist
-            </button>
-            <button className="cp-btn" onClick={() => setMode("join")} style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 12 }}>
-              join caselist
-            </button>
-          </div>
-        )}
-
-        {mode === "create" && (
-          <div>
-            <Label>caselist name</Label>
-            <input
-              className="cp-input"
-              autoFocus
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                setError("");
-              }}
-              placeholder="e.g. lincoln-debate-2026"
-              style={{ ...inputStyle, width: "100%" }}
-            />
-            {legacyCount > 0 && (
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--cp-muted)", marginBottom: 14, cursor: "pointer" }}>
-                <input type="checkbox" checked={importAfterCreate} onChange={(e) => setImportAfterCreate(e.target.checked)} />
-                import {legacyCount} existing case{legacyCount === 1 ? "" : "s"} from before caselists
-              </label>
-            )}
-            {error && <p style={{ color: "var(--cp-bad)", fontSize: 11, marginBottom: 10 }}>{error}</p>}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="cp-btn-icon"
-                onClick={() => {
-                  setMode("choose");
-                  setError("");
-                }}
-                style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
-              >
-                back
-              </button>
-              <button
-                className="cp-btn"
-                disabled={busy || !name.trim()}
-                onClick={handleCreate}
-                style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
-              >
-                {busy ? "creating…" : "create"}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {mode === "join" && (
-          <div>
-            <Label>caselist name</Label>
-            <input
-              className="cp-input"
-              autoFocus
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                setError("");
-              }}
-              placeholder="ask whoever created it"
-              style={{ ...inputStyle, width: "100%" }}
-            />
-            <Label>join code</Label>
-            <input
-              className="cp-input"
-              value={code}
-              onChange={(e) => {
-                setCode(e.target.value);
-                setError("");
-              }}
-              placeholder="6-character code"
-              style={{ ...inputStyle, width: "100%", textTransform: "uppercase", letterSpacing: "0.08em" }}
-            />
-            {error && <p style={{ color: "var(--cp-bad)", fontSize: 11, marginBottom: 10 }}>{error}</p>}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="cp-btn-icon"
-                onClick={() => {
-                  setMode("choose");
-                  setError("");
-                }}
-                style={{ border: "1px solid var(--cp-border)", padding: "8px 10px" }}
-              >
-                back
-              </button>
-              <button
-                className="cp-btn"
-                disabled={busy || !name.trim() || !code.trim()}
-                onClick={handleJoin}
-                style={{ flex: 1, justifyContent: "center", padding: "9px 0", fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1 }}
-              >
-                {busy ? "joining…" : "join"}
-              </button>
-            </div>
-          </div>
-        )}
+        <CaselistManager user={user} myCaselists={myCaselists} legacyCount={legacyCount} activeCaselistId={null} onSelect={onSelect} />
       </div>
     </div>
   );
 }
 
-function CaselistBar({ meta, user, multipleCaselists, onSwitch, onMembers, onSignOut }) {
+function CaselistBar({ meta, user, onSwitch, onMembers, onSignOut }) {
   if (!meta) return null;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
       <span style={{ fontSize: 12, color: "var(--cp-muted)" }}>
         caselist: <strong style={{ color: "var(--cp-text)", fontWeight: 600 }}>{meta.name}</strong>
       </span>
-      {multipleCaselists && (
-        <button
-          className="cp-btn-icon"
-          onClick={onSwitch}
-          title="switch caselist"
-          style={{ border: "1px solid var(--cp-border)", padding: "3px 7px", gap: 4, fontSize: 11 }}
-        >
-          <ChevronsUpDown size={11} /> switch
-        </button>
-      )}
+      <button
+        className="cp-btn-icon"
+        onClick={onSwitch}
+        title="switch, create, or join a caselist"
+        style={{ border: "1px solid var(--cp-border)", padding: "3px 7px", gap: 4, fontSize: 11 }}
+      >
+        <ChevronsUpDown size={11} /> caselists
+      </button>
       <button
         className="cp-btn-icon"
         onClick={onMembers}
@@ -1386,33 +1399,26 @@ function CaselistBar({ meta, user, multipleCaselists, onSwitch, onMembers, onSig
   );
 }
 
-function CaselistSwitcherModal({ myCaselists, activeCaselistId, onClose, onSelect }) {
-  const ids = Object.keys(myCaselists);
+function CaselistSwitcherModal({ user, myCaselists, legacyCount, activeCaselistId, onClose, onSelect }) {
   return (
     <div
       onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
     >
-      <div className="cp-card" onClick={(e) => e.stopPropagation()} style={{ padding: 20, width: "100%", maxWidth: 340 }}>
-        <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15, marginBottom: 12 }}>switch caselist</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {ids.map((id) => (
-            <button
-              key={id}
-              className="cp-btn"
-              onClick={() => onSelect(id)}
-              style={{
-                justifyContent: "space-between",
-                padding: "9px 12px",
-                fontSize: 13,
-                borderColor: id === activeCaselistId ? "var(--cp-accent)" : "var(--cp-border)",
-              }}
-            >
-              {myCaselists[id].name}
-              <span style={{ fontSize: 10, color: "var(--cp-muted)" }}>{myCaselists[id].role}</span>
-            </button>
-          ))}
+      <div className="cp-card" onClick={(e) => e.stopPropagation()} style={{ padding: 20, width: "100%", maxWidth: 380, maxHeight: "85vh", overflow: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15 }}>your caselists</div>
+          <button className="cp-btn-icon" onClick={onClose} title="close">
+            <X size={14} />
+          </button>
         </div>
+        <CaselistManager
+          user={user}
+          myCaselists={myCaselists}
+          legacyCount={legacyCount}
+          activeCaselistId={activeCaselistId}
+          onSelect={onSelect}
+        />
       </div>
     </div>
   );
