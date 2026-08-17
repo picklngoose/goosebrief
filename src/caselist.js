@@ -27,8 +27,11 @@ function memberRecord(user, role) {
 }
 
 // Creates a new caselist, adds the creator as its owner, and reserves the
-// caselist's name in the global name index — all in one atomic multi-path
-// update, so a failed write can never leave a half-created caselist behind.
+// caselist's name in the global name index. Writes meta first and waits
+// for it to actually commit before touching anything else — later writes
+// check "who owns this caselist" by reading meta back, and that check
+// only needs to be reliable against data that's genuinely already saved,
+// not data still in flight as part of the same call.
 export async function createCaselist(user, rawName) {
   const name = (rawName || "").trim();
   if (!name) throw new Error("give your caselist a name");
@@ -41,15 +44,16 @@ export async function createCaselist(user, rawName) {
   const joinCode = makeJoinCode();
   const now = Date.now();
 
+  await dbSet(ref(db, `caselists/${caselistId}/meta`), {
+    name,
+    nameLower,
+    joinCode,
+    ownerUid: user.uid,
+    ownerName: user.displayName || user.email || "owner",
+    createdAt: now,
+  });
+
   await update(ref(db), {
-    [`caselists/${caselistId}/meta`]: {
-      name,
-      nameLower,
-      joinCode,
-      ownerUid: user.uid,
-      ownerName: user.displayName || user.email || "owner",
-      createdAt: now,
-    },
     [`caselists/${caselistId}/members/${user.uid}`]: memberRecord(user, "owner"),
     [`caselistNameIndex/${nameLower}`]: caselistId,
     [`userCaselists/${user.uid}/${caselistId}`]: { name, role: "owner", joinedAt: now },
@@ -59,10 +63,11 @@ export async function createCaselist(user, rawName) {
 }
 
 // Looks the caselist up by name, then attempts to add the joiner as a
-// member. The join code is submitted alongside the membership write in the
-// same atomic update — the database rules compare it against the stored
-// code server-side and reject the whole update if it's wrong, without ever
-// exposing the real code to a client that hasn't already joined.
+// member. The code guess is written to its own path and awaited first, so
+// by the time the membership write happens, the rule comparing the two is
+// reading two pieces of data that both genuinely already exist — no
+// reliance on Firebase resolving a write still in flight in the same
+// operation as something else.
 export async function joinCaselist(user, rawName, rawCode) {
   const nameLower = normalizeCaselistName(rawName);
   const code = (rawCode || "").trim().toUpperCase();
@@ -74,13 +79,15 @@ export async function joinCaselist(user, rawName, rawCode) {
   const caselistId = snap.val();
   const now = Date.now();
 
+  await dbSet(ref(db, `caselists/${caselistId}/joinAttempts/${user.uid}`), code);
+
   try {
     await update(ref(db), {
       [`caselists/${caselistId}/members/${user.uid}`]: memberRecord(user, "member"),
-      [`caselists/${caselistId}/joinAttempts/${user.uid}`]: code,
       [`userCaselists/${user.uid}/${caselistId}`]: { name: rawName.trim(), role: "member", joinedAt: now },
     });
   } catch (e) {
+    console.error("goosebrief join failed:", e);
     throw new Error("wrong join code");
   }
 
@@ -106,6 +113,38 @@ export async function regenerateJoinCode(caselistId) {
   const code = makeJoinCode();
   await dbSet(ref(db, `caselists/${caselistId}/meta/joinCode`), code);
   return code;
+}
+
+// Renames a caselist. If the normalized (join-by) name doesn't actually
+// change — e.g. only capitalization/spacing changed — this just updates
+// the display name in place. Otherwise it claims the new name in the
+// index first, repoints meta at it, and only then releases the old name,
+// so the caselist is never briefly unreachable by any name mid-rename.
+//
+// Known limitation: this only updates the *renaming user's* own cached
+// userCaselists entry. Other members will still see the old name in
+// their "your caselists" list until they rejoin or their cache otherwise
+// refreshes — the caselist itself, and its name once you're inside it,
+// are correct immediately for everyone.
+export async function renameCaselist(user, caselistId, currentNameLower, rawNewName) {
+  const newName = (rawNewName || "").trim();
+  if (!newName) throw new Error("give your caselist a name");
+  const newNameLower = normalizeCaselistName(newName);
+
+  if (newNameLower === currentNameLower) {
+    await dbSet(ref(db, `caselists/${caselistId}/meta/name`), newName);
+  } else {
+    const existing = await get(ref(db, `caselistNameIndex/${newNameLower}`));
+    if (existing.exists()) throw new Error("that caselist name is already taken — try another");
+
+    await dbSet(ref(db, `caselistNameIndex/${newNameLower}`), caselistId);
+    await update(ref(db, `caselists/${caselistId}/meta`), { name: newName, nameLower: newNameLower });
+    await dbSet(ref(db, `caselistNameIndex/${currentNameLower}`), null);
+  }
+
+  await dbSet(ref(db, `userCaselists/${user.uid}/${caselistId}/name`), newName).catch(() => {});
+
+  return { name: newName, nameLower: newNameLower };
 }
 
 // One-time helper for teams upgrading from the pre-caselist version of the
