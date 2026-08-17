@@ -14,6 +14,7 @@ import {
   LogOut,
   Copy,
   RefreshCw,
+  Pencil,
   X,
 } from "lucide-react";
 import { uid } from "./utils.js";
@@ -30,6 +31,7 @@ import {
   leaveCaselist,
   removeMember,
   regenerateJoinCode,
+  renameCaselist,
   importLegacyCases,
 } from "./caselist.js";
 
@@ -1430,6 +1432,11 @@ function MembersModal({ caselistId, meta, user, onClose, onLeft }) {
   const [busy, setBusy] = useState(false);
   const myUid = user.uid;
 
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(meta?.name || "");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState("");
+
   useEffect(() => {
     const r = ref(db, `caselists/${caselistId}/members`);
     const unsubscribe = onValue(r, (snap) => setMembers(snap.val() || {}));
@@ -1439,6 +1446,10 @@ function MembersModal({ caselistId, meta, user, onClose, onLeft }) {
   useEffect(() => {
     setCode(meta?.joinCode || "");
   }, [meta?.joinCode]);
+
+  useEffect(() => {
+    if (!editingName) setNameDraft(meta?.name || "");
+  }, [meta?.name, editingName]);
 
   const isOwner = meta?.ownerUid === myUid;
 
@@ -1471,13 +1482,93 @@ function MembersModal({ caselistId, meta, user, onClose, onLeft }) {
     }
   }
 
+  async function handleRename() {
+    const trimmed = nameDraft.trim();
+    if (!trimmed || trimmed === meta?.name) {
+      setEditingName(false);
+      setNameDraft(meta?.name || "");
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError("");
+    try {
+      await renameCaselist(user, caselistId, meta.nameLower, trimmed);
+      setEditingName(false);
+    } catch (e) {
+      setRenameError(e.message || "couldn't rename");
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
   return (
     <div
       onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
     >
       <div className="cp-card" onClick={(e) => e.stopPropagation()} style={{ padding: 20, width: "100%", maxWidth: 400, maxHeight: "80vh", overflow: "auto" }}>
-        <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15, marginBottom: 4 }}>{meta?.name}</div>
+        {editingName ? (
+          <div style={{ marginBottom: 16 }}>
+            <input
+              className="cp-input"
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleRename();
+                if (e.key === "Escape") {
+                  setEditingName(false);
+                  setNameDraft(meta?.name || "");
+                  setRenameError("");
+                }
+              }}
+              style={{
+                fontFamily: "var(--cp-display)",
+                fontWeight: 600,
+                fontSize: 15,
+                border: "1px solid var(--cp-border)",
+                borderRadius: 6,
+                padding: "6px 8px",
+                width: "100%",
+              }}
+            />
+            <p style={{ fontSize: 10, color: "var(--cp-muted)", margin: "6px 0 0" }}>
+              teammates will need this new name — not the old one — to join from now on.
+            </p>
+            {renameError && <p style={{ color: "var(--cp-bad)", fontSize: 11, margin: "6px 0 0" }}>{renameError}</p>}
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <button
+                className="cp-btn"
+                disabled={renameBusy || !nameDraft.trim()}
+                onClick={handleRename}
+                style={{ padding: "5px 12px", fontSize: 11, fontWeight: 600, opacity: renameBusy ? 0.6 : 1 }}
+              >
+                {renameBusy ? "saving…" : "save"}
+              </button>
+              <button
+                className="cp-btn-icon"
+                onClick={() => {
+                  setEditingName(false);
+                  setNameDraft(meta?.name || "");
+                  setRenameError("");
+                }}
+                style={{ border: "1px solid var(--cp-border)", padding: "5px 12px", fontSize: 11 }}
+              >
+                cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <div style={{ fontFamily: "var(--cp-display)", fontWeight: 600, fontSize: 15 }}>{meta?.name}</div>
+            {isOwner && (
+              <button className="cp-btn-icon" onClick={() => setEditingName(true)} title="rename caselist" style={{ padding: 3 }}>
+                <Pencil size={12} />
+              </button>
+            )}
+          </div>
+        )}
+
         <div style={{ fontSize: 11, color: "var(--cp-muted)", marginBottom: 16 }}>
           {members ? Object.keys(members).length : "…"} member{members && Object.keys(members).length === 1 ? "" : "s"}
         </div>
